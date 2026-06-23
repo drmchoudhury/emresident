@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Duty Log — EM Residency Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+  :root{
+    --teal-900:#102E2F; --teal-700:#1F4B4D; --teal-500:#2E6B6E;
+    --cream:#F7F5F0; --paper:#FFFFFF; --slate:#44514F; --slate-light:#7C8985;
+    --amber:#D98E04; --amber-soft:#FBE8C6; --green:#4C8C6B; --green-soft:#DCEEE3;
+    --red:#C1554A; --red-soft:#F6DEDA; --line:#E2DFD6; --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--cream);color:var(--teal-900);font-family:'Inter',sans-serif;-webkit-font-smoothing:antialiased;}
+  .mono{font-family:'IBM Plex Mono',monospace;}
+  .display{font-family:'Space Grotesk',sans-serif;}
+  #app{max-width:980px;margin:0 auto;padding:20px 20px 60px;}
+
+  .topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 0 22px;border-bottom:1px solid var(--line);margin-bottom:24px;}
+  .brand{display:flex;align-items:center;gap:10px;}
+  .brand-mark{width:30px;height:30px;border-radius:7px;background:var(--teal-700);display:flex;align-items:center;justify-content:center;color:var(--cream);font-family:'Space Grotesk';font-weight:700;font-size:14px;flex-shrink:0;}
+  .brand-name{font-family:'Space Grotesk';font-weight:700;font-size:16px;letter-spacing:.2px;}
+  .brand-sub{font-size:11.5px;color:var(--slate-light);margin-top:1px;}
+  .who{font-size:13px;color:var(--slate);display:flex;align-items:center;gap:10px;}
+  .who button{background:none;border:1px solid var(--line);color:var(--slate);padding:5px 11px;border-radius:7px;font-size:12.5px;cursor:pointer;font-family:'Inter';}
+  .who button:hover{border-color:var(--teal-500);color:var(--teal-700);}
+
+  .landing{padding:40px 0 20px;max-width:380px;margin:0 auto;}
+  .landing h1{font-family:'Space Grotesk';font-size:24px;margin:0 0 6px;letter-spacing:-.3px;text-align:center;}
+  .landing p{color:var(--slate);font-size:14px;text-align:center;margin:0 0 28px;}
+  .tabs{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;margin-bottom:20px;}
+  .tabs button{flex:1;padding:9px 0;background:var(--paper);border:none;cursor:pointer;font-family:'Inter';font-weight:500;font-size:13.5px;color:var(--slate-light);}
+  .tabs button.active{background:var(--teal-700);color:#fff;}
+  .auth-form{display:flex;flex-direction:column;gap:12px;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:22px;}
+  .auth-form label{font-size:11.5px;color:var(--slate-light);display:block;margin-bottom:4px;}
+  .auth-form input,.auth-form select{width:100%;font-family:'Inter';font-size:13.5px;padding:9px 11px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--teal-900);}
+  .role-pick{display:flex;gap:8px;}
+  .role-pick label{flex:1;border:1px solid var(--line);border-radius:7px;padding:9px;text-align:center;cursor:pointer;font-size:13px;color:var(--slate);display:flex;align-items:center;justify-content:center;gap:6px;margin:0;}
+  .role-pick input{width:auto;margin:0;}
+  .auth-submit{background:var(--teal-700);color:#fff;border:none;padding:11px 0;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;font-family:'Inter';margin-top:4px;}
+  .auth-submit:hover{background:var(--teal-900);}
+  .auth-submit:disabled{opacity:.6;cursor:default;}
+  .auth-err{color:var(--red);font-size:12.5px;background:var(--red-soft);padding:8px 11px;border-radius:7px;}
+  .auth-ok{color:var(--green);font-size:12.5px;background:var(--green-soft);padding:8px 11px;border-radius:7px;}
+
+  .clock-card{background:var(--teal-900);color:var(--cream);border-radius:14px;padding:30px 32px;margin-bottom:22px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:18px;}
+  .clock-time{font-family:'Space Grotesk';font-size:38px;font-weight:700;letter-spacing:.5px;}
+  .clock-date{font-size:12.5px;color:#9FB6B4;margin-top:2px;}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:99px;font-size:12.5px;font-weight:600;margin-top:10px;}
+  .pill .dot{width:7px;height:7px;border-radius:50%;}
+  .pill.on{background:rgba(76,140,107,.22);color:#9FE0BC;} .pill.on .dot{background:#5FD491;}
+  .pill.off{background:rgba(124,137,133,.22);color:#C9D6D3;} .pill.off .dot{background:#9FB6B4;}
+  .pill.leave{background:rgba(217,142,4,.22);color:#FFCD7A;} .pill.leave .dot{background:#FFCD7A;}
+  .clock-action button{font-family:'Space Grotesk';font-weight:700;font-size:15px;padding:14px 26px;border-radius:10px;border:none;cursor:pointer;}
+  .btn-in{background:var(--green);color:#fff;} .btn-in:hover{background:#3d765a;}
+  .btn-out{background:var(--red);color:#fff;} .btn-out:hover{background:#a8453b;}
+  .clock-action button:disabled{opacity:.6;cursor:default;}
+  .geo-note{font-size:11px;color:#9FB6B4;margin-top:8px;max-width:200px;}
+
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px;}
+  @media (max-width:720px){.grid{grid-template-columns:1fr;}}
+  .card{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:20px;}
+  .card h2{font-family:'Space Grotesk';font-size:15px;margin:0 0 14px;display:flex;justify-content:space-between;align-items:center;}
+  .card h2 .count{font-size:11.5px;color:var(--slate-light);font-weight:400;}
+  .stat-row{display:flex;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
+  .stat{flex:1;min-width:140px;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;}
+  .stat .num{font-family:'Space Grotesk';font-size:24px;font-weight:700;}
+  .stat .label{font-size:12px;color:var(--slate-light);margin-top:2px;}
+  .log-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px;}
+  .log-row:last-child{border-bottom:none;}
+  .log-type{font-weight:600;} .log-type.in{color:var(--green);} .log-type.out{color:var(--red);}
+  .log-meta{color:var(--slate-light);font-size:11.5px;}
+  .empty{color:var(--slate-light);font-size:13px;padding:14px 0;text-align:center;}
+  form.leave-form{display:flex;flex-direction:column;gap:10px;}
+  .field-row{display:flex;gap:10px;} .field-row .field{flex:1;}
+  label{font-size:11.5px;color:var(--slate-light);display:block;margin-bottom:4px;}
+  input,textarea,select{width:100%;font-family:'Inter';font-size:13.5px;padding:9px 11px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--teal-900);}
+  textarea{resize:vertical;min-height:60px;}
+  .submit-btn{align-self:flex-start;background:var(--amber);color:#3A2700;border:none;padding:10px 18px;border-radius:8px;font-weight:600;font-size:13.5px;cursor:pointer;margin-top:2px;}
+  .submit-btn:hover{background:#c27f03;}
+  .badge{padding:3px 9px;border-radius:99px;font-size:11px;font-weight:600;}
+  .badge.pending{background:var(--amber-soft);color:#8A5A02;}
+  .badge.approved{background:var(--green-soft);color:#2F6A4A;}
+  .badge.denied{background:var(--red-soft);color:#8E332A;}
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  th{text-align:left;font-size:11px;color:var(--slate-light);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line);text-transform:uppercase;letter-spacing:.3px;}
+  td{padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  .resident-name{font-weight:600;}
+  .small-btn{border:1px solid var(--line);background:#fff;padding:5px 10px;border-radius:6px;font-size:11.5px;cursor:pointer;margin-right:5px;}
+  .small-btn.approve:hover{background:var(--green-soft);border-color:var(--green);}
+  .small-btn.deny:hover{background:var(--red-soft);border-color:var(--red);}
+  .coords{font-size:11px;color:var(--slate-light);}
+  .err{color:var(--red);font-size:12.5px;background:var(--red-soft);padding:8px 11px;border-radius:7px;margin-top:8px;}
+  .loading-screen{text-align:center;padding:80px 0;color:var(--slate-light);font-size:13px;}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+// ============================================================
+// Supabase config
+// ============================================================
+const SUPABASE_URL = 'https://poyreokuagzqoyfijtzi.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBveXJlb2t1YWd6cW95ZmlqdHppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIyMjM4MjgsImV4cCI6MjA5Nzc5OTgyOH0.9RlDjcCJZp9fvQND8Q4jirvDlKVKmW7RmLsbXvFSUD8';
+const PROGRAM_ID = 'db507be1-a3a3-4c7e-ae46-7b08babc1468';
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const root = document.getElementById('app');
+let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false };
+let data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{} };
+
+function fmtTime(ts){ return new Date(ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
+function fmtDateTime(ts){ const d=new Date(ts); return d.toLocaleDateString([], {month:'short',day:'numeric'}) + ', ' + fmtTime(ts); }
+
+// ============================================================
+// Auth
+// ============================================================
+async function refreshSession(){
+  const { data: sess } = await sb.auth.getSession();
+  state.user = sess?.session?.user || null;
+  if(state.user){
+    const { data: prof, error } = await sb.from('profiles').select('*').eq('id', state.user.id).single();
+    if(error){ state.profile = null; }
+    else { state.profile = prof; }
+  } else {
+    state.profile = null;
+  }
+  state.loading = false;
+}
+
+async function signUp(e){
+  e.preventDefault();
+  state.authError = null; state.authInfo = null;
+  const f = e.target;
+  const email = f.email.value.trim();
+  const password = f.password.value;
+  const full_name = f.full_name.value.trim();
+  const role = f.role.value;
+  if(!email || !password || !full_name){ state.authError = 'Fill in all fields.'; render(); return; }
+
+  const submitBtn = f.querySelector('button[type=submit]');
+  submitBtn.disabled = true;
+  const { data: res, error } = await sb.auth.signUp({
+    email, password,
+    options: { data: { full_name, role, program_id: PROGRAM_ID } }
+  });
+  submitBtn.disabled = false;
+
+  if(error){ state.authError = error.message; render(); return; }
+  if(res.session){
+    await refreshSession();
+    render();
+  } else {
+    state.authInfo = 'Account created. Check your email to confirm, then log in.';
+    state.authTab = 'login';
+    render();
+  }
+}
+
+async function signIn(e){
+  e.preventDefault();
+  state.authError = null; state.authInfo = null;
+  const f = e.target;
+  const email = f.email.value.trim();
+  const password = f.password.value;
+  const submitBtn = f.querySelector('button[type=submit]');
+  submitBtn.disabled = true;
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  submitBtn.disabled = false;
+  if(error){ state.authError = error.message; render(); return; }
+  await refreshSession();
+  await loadAllData();
+  render();
+}
+
+async function signOut(){
+  await sb.auth.signOut();
+  state = { loading:false, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null };
+  data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{} };
+  render();
+}
+
+// ============================================================
+// Data loading
+// ============================================================
+async function loadAllData(){
+  if(!state.profile) return;
+  const { data: prog } = await sb.from('programs').select('*').eq('id', PROGRAM_ID).single();
+  state.program = prog || null;
+  if(state.profile.role === 'resident'){
+    const { data: logs } = await sb.from('time_logs').select('*').eq('resident_id', state.user.id).order('occurred_at', {ascending:false});
+    data.myLogs = logs || [];
+    const { data: leaves } = await sb.from('sick_leaves').select('*').eq('resident_id', state.user.id).order('created_at', {ascending:false});
+    data.myLeaves = leaves || [];
+  } else {
+    const { data: logs } = await sb.from('time_logs').select('*').eq('program_id', PROGRAM_ID).order('occurred_at', {ascending:false});
+    data.allLogs = logs || [];
+    const { data: leaves } = await sb.from('sick_leaves').select('*').eq('program_id', PROGRAM_ID).order('created_at', {ascending:false});
+    data.allLeaves = leaves || [];
+    const { data: profs } = await sb.from('profiles').select('*').eq('program_id', PROGRAM_ID);
+    data.profilesById = {};
+    (profs || []).forEach(p => data.profilesById[p.id] = p);
+  }
+}
+
+// ============================================================
+// Geolocation (fail-safe)
+// ============================================================
+function getLocation(){
+  return new Promise((resolve)=>{
+    try{
+      if(!navigator.geolocation){ resolve({error:'Location services are not available in this environment.'}); return; }
+      navigator.geolocation.getCurrentPosition(
+        pos => resolve({lat:pos.coords.latitude, lng:pos.coords.longitude, accuracy:Math.round(pos.coords.accuracy)}),
+        err => resolve({error: 'Location was not captured (' + (err.message || 'permission denied') + ').'}),
+        { enableHighAccuracy:true, timeout:6000 }
+      );
+    }catch(e){
+      resolve({error:'Location access is blocked in this environment.'});
+    }
+  });
+}
+
+const GEOFENCE_RADIUS_M = 300; // distance from facility, in meters, beyond which a clock event is flagged
+const ACCURACY_SUSPICIOUS_MAX_M = 2;   // GPS accuracy reported tighter than this is unusual for a phone and worth a look
+const IP_MISMATCH_KM = 150;            // GPS vs IP-geolocation distance beyond this is flagged
+const IMPOSSIBLE_SPEED_KMH = 900;      // faster than a commercial flight between two consecutive clock events
+
+function distanceMeters(lat1, lng1, lat2, lng2){
+  if(lat1==null || lng1==null || lat2==null || lng2==null) return null;
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2-lat1);
+  const dLng = toRad(lng2-lng1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLng/2)**2;
+  const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+// Looks up the approximate location of the caller's IP address (city-level accuracy).
+// Used as an independent cross-check against the GPS coordinates — a large mismatch
+// can indicate the GPS reading was spoofed (e.g. a fake-location app) or the device is
+// connecting through a remote network for some other reason.
+async function lookupIpLocation(){
+  // Try ipapi.co first, fall back to ipwho.is if it fails — different free IP-geolocation
+  // providers sometimes rate-limit or reject requests from certain origins.
+  try{
+    const controller = new AbortController();
+    const timeout = setTimeout(()=>controller.abort(), 4000);
+    const res = await fetch('https://ipapi.co/json/', { signal: controller.signal });
+    clearTimeout(timeout);
+    if(res.ok){
+      const json = await res.json();
+      if(json && !json.error && json.latitude != null){
+        return { ip: json.ip, lat: json.latitude, lng: json.longitude };
+      }
+    }
+  }catch(e){
+    console.warn('ipapi.co lookup failed:', e);
+  }
+  try{
+    const controller = new AbortController();
+    const timeout = setTimeout(()=>controller.abort(), 4000);
+    const res = await fetch('https://ipwho.is/', { signal: controller.signal });
+    clearTimeout(timeout);
+    if(res.ok){
+      const json = await res.json();
+      if(json && json.success !== false){
+        return { ip: json.ip, lat: json.latitude, lng: json.longitude };
+      }
+    }
+  }catch(e){
+    console.warn('ipwho.is lookup failed:', e);
+  }
+  return null;
+}
+
+// Computes spoofing-risk flags for a chronologically-ordered (oldest first) list of logs.
+// Returns a map of log id -> { accuracySuspicious, ipMismatchKm, impossibleSpeedKmh }
+function computeRiskFlags(logsAsc){
+  const flags = {};
+  let prev = null;
+  for(const l of logsAsc){
+    const f = {};
+    if(l.accuracy_m != null && l.accuracy_m < ACCURACY_SUSPICIOUS_MAX_M){
+      f.accuracySuspicious = true;
+    }
+    if(l.lat != null && l.ip_lat != null){
+      const distKm = distanceMeters(l.lat, l.lng, l.ip_lat, l.ip_lng) / 1000;
+      if(distKm > IP_MISMATCH_KM) f.ipMismatchKm = distKm;
+    }
+    if(prev && prev.lat != null && l.lat != null){
+      const distKm = distanceMeters(prev.lat, prev.lng, l.lat, l.lng) / 1000;
+      const hours = (new Date(l.occurred_at) - new Date(prev.occurred_at)) / 3600000;
+      if(hours > 0){
+        const speed = distKm / hours;
+        if(speed > IMPOSSIBLE_SPEED_KMH) f.impossibleSpeedKmh = speed;
+      }
+    }
+    flags[l.id] = f;
+    prev = l;
+  }
+  return flags;
+}
+
+function hasAnyFlag(f){
+  return !!(f && (f.accuracySuspicious || f.ipMismatchKm || f.impossibleSpeedKmh));
+}
+
+function daysWorkedThisMonth(logs){
+  if(!logs || logs.length===0) return 0;
+  const now = new Date();
+  const monthKey = now.getFullYear() + '-' + now.getMonth();
+  const days = new Set();
+  for(const l of logs){
+    if(l.type !== 'in') continue;
+    const d = new Date(l.occurred_at);
+    if((d.getFullYear() + '-' + d.getMonth()) === monthKey){
+      days.add(d.toISOString().slice(0,10));
+    }
+  }
+  return days.size;
+}
+
+function residentStatus(logs, leaves){
+  const today = new Date().toISOString().slice(0,10);
+  const onLeaveToday = (leaves||[]).some(s => s.status==='approved' && s.start_date<=today && today<=s.end_date);
+  if(onLeaveToday) return 'leave';
+  if(!logs || logs.length===0) return 'off';
+  return logs[0].type === 'in' ? 'on' : 'off';
+}
+
+function startOfWeek(){
+  const d = new Date();
+  const day = d.getDay(); // 0 = Sunday
+  const diff = day === 0 ? 6 : day - 1; // treat Monday as start of week
+  d.setDate(d.getDate() - diff);
+  d.setHours(0,0,0,0);
+  return d;
+}
+
+// Pairs chronological in/out events and sums duration since the start of this week.
+// An open clock-in (no matching out yet) counts up to "now".
+function hoursThisWeek(logs){
+  if(!logs || logs.length===0) return 0;
+  const weekStart = startOfWeek().getTime();
+  const sorted = [...logs].sort((a,b)=> new Date(a.occurred_at) - new Date(b.occurred_at));
+  let totalMs = 0;
+  let openIn = null;
+  for(const l of sorted){
+    const t = new Date(l.occurred_at).getTime();
+    if(l.type === 'in'){
+      openIn = t;
+    } else if(l.type === 'out' && openIn !== null){
+      const start = Math.max(openIn, weekStart);
+      const end = t;
+      if(end > start) totalMs += (end - start);
+      openIn = null;
+    }
+  }
+  if(openIn !== null){
+    const start = Math.max(openIn, weekStart);
+    const end = Date.now();
+    if(end > start) totalMs += (end - start);
+  }
+  return totalMs / 3600000;
+}
+
+async function clockAction(type){
+  state.clockError = null;
+  let loc;
+  try{ loc = await getLocation(); }
+  catch(e){ loc = { error:'Location access is blocked in this environment.' }; }
+
+  const ipLoc = await lookupIpLocation();
+
+  const { error } = await sb.from('time_logs').insert({
+    resident_id: state.user.id,
+    program_id: PROGRAM_ID,
+    type,
+    occurred_at: new Date().toISOString(),
+    lat: loc.error ? null : loc.lat,
+    lng: loc.error ? null : loc.lng,
+    accuracy_m: loc.error ? null : loc.accuracy,
+    ip_address: ipLoc ? ipLoc.ip : null,
+    ip_lat: ipLoc ? ipLoc.lat : null,
+    ip_lng: ipLoc ? ipLoc.lng : null
+  });
+
+  if(error){
+    state.clockError = 'Could not save clock event: ' + error.message;
+  } else if(loc.error){
+    state.clockError = loc.error + ' The clock event was still recorded, but without a location.';
+  }
+  await loadAllData();
+  render();
+}
+
+async function submitLeave(e){
+  e.preventDefault();
+  const f = e.target;
+  const start_date = f.start.value, end_date = f.end.value, reason = f.reason.value.trim();
+  if(!start_date || !end_date || !reason) return;
+  await sb.from('sick_leaves').insert({
+    resident_id: state.user.id, program_id: PROGRAM_ID,
+    start_date, end_date, reason, status:'pending'
+  });
+  state.leaveForm = false;
+  await loadAllData();
+  render();
+}
+
+async function setLeaveStatus(id, status){
+  await sb.from('sick_leaves').update({ status, reviewed_by: state.user.id, reviewed_at: new Date().toISOString() }).eq('id', id);
+  await loadAllData();
+  render();
+}
+
+async function saveFacilityLocation(e){
+  e.preventDefault();
+  const f = e.target;
+  const lat = parseFloat(f.lat.value);
+  const lng = parseFloat(f.lng.value);
+  if(isNaN(lat) || isNaN(lng)) return;
+  await sb.from('programs').update({ facility_lat: lat, facility_lng: lng }).eq('id', PROGRAM_ID);
+  state.facilityForm = false;
+  await loadAllData();
+  render();
+}
+
+async function useCurrentLocationForFacility(){
+  const loc = await getLocation();
+  if(loc.error){
+    state.clockError = loc.error;
+    render();
+    return;
+  }
+  document.querySelector('input[name="lat"]').value = loc.lat.toFixed(6);
+  document.querySelector('input[name="lng"]').value = loc.lng.toFixed(6);
+}
+
+// ============================================================
+// Render
+// ============================================================
+function topbar(subtitle){
+  return `
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-mark">ED</div>
+      <div><div class="brand-name">Duty Log</div><div class="brand-sub">${subtitle}</div></div>
+    </div>
+    ${state.profile ? `<div class="who">${state.profile.full_name} <button id="logoutBtn">Sign out</button></div>` : ''}
+  </div>`;
+}
+
+function render(){
+  if(state.loading){ root.innerHTML = `${topbar('Loading…')}<div class="loading-screen">Loading your account…</div>`; return; }
+  if(!state.user || !state.profile){ renderAuth(); return; }
+  if(state.profile.role === 'resident'){ renderResident(); return; }
+  renderDirector();
+}
+
+function renderAuth(){
+  const isLogin = state.authTab === 'login';
+  root.innerHTML = `
+    ${topbar('EM Residency attendance tracker')}
+    <div class="landing">
+      <h1>${isLogin ? 'Sign in' : 'Create your account'}</h1>
+      <p>${isLogin ? 'Clock in, clock out, and report leave.' : 'Residents and program directors both sign up here.'}</p>
+      <div class="tabs">
+        <button class="${isLogin?'active':''}" id="tabLogin">Sign in</button>
+        <button class="${!isLogin?'active':''}" id="tabSignup">Sign up</button>
+      </div>
+      ${state.authError ? `<div class="auth-err" style="margin-bottom:12px;">${state.authError}</div>` : ''}
+      ${state.authInfo ? `<div class="auth-ok" style="margin-bottom:12px;">${state.authInfo}</div>` : ''}
+      ${isLogin ? `
+        <form class="auth-form" id="loginForm">
+          <div><label>Email</label><input type="email" name="email" required /></div>
+          <div><label>Password</label><input type="password" name="password" required /></div>
+          <button type="submit" class="auth-submit">Sign in</button>
+        </form>
+      ` : `
+        <form class="auth-form" id="signupForm">
+          <div><label>Full name</label><input type="text" name="full_name" required /></div>
+          <div><label>Email</label><input type="email" name="email" required /></div>
+          <div><label>Password</label><input type="password" name="password" minlength="6" required /></div>
+          <div>
+            <label>I am a...</label>
+            <div class="role-pick">
+              <label><input type="radio" name="role" value="resident" checked /> Resident</label>
+              <label><input type="radio" name="role" value="director" /> Program director</label>
+            </div>
+          </div>
+          <button type="submit" class="auth-submit">Create account</button>
+        </form>
+      `}
+    </div>
+  `;
+  document.getElementById('tabLogin').onclick = ()=>{ state.authTab='login'; state.authError=null; render(); };
+  document.getElementById('tabSignup').onclick = ()=>{ state.authTab='signup'; state.authError=null; render(); };
+  const lf = document.getElementById('loginForm'); if(lf) lf.onsubmit = signIn;
+  const sf = document.getElementById('signupForm'); if(sf) sf.onsubmit = signUp;
+}
+
+function renderResident(){
+  const status = residentStatus(data.myLogs, data.myLeaves);
+  const isOn = status==='on';
+  const now = new Date();
+  root.innerHTML = `
+    ${topbar('Resident view')}
+    <div class="clock-card">
+      <div>
+        <div class="clock-time mono">${now.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</div>
+        <div class="clock-date">${now.toLocaleDateString([], {weekday:'long', month:'long', day:'numeric'})}</div>
+        <div class="pill ${status}"><span class="dot"></span>${status==='on'?'On duty':status==='leave'?'On approved leave':'Off duty'}</div>
+      </div>
+      <div class="clock-action" style="text-align:right;">
+        <button class="${isOn?'btn-out':'btn-in'}" id="clockBtn">${isOn?'Clock Out':'Clock In'}</button>
+        <div class="geo-note">Location is captured at the moment you clock in or out.</div>
+      </div>
+    </div>
+    ${state.clockError ? `<div class="err">${state.clockError}</div>` : ''}
+
+    <div class="grid">
+      <div class="card">
+        <h2>Recent activity <span class="count">${data.myLogs.length} entries</span></h2>
+        ${data.myLogs.length===0 ? '<div class="empty">No clock events yet.</div>' :
+          data.myLogs.slice(0,8).map(l=>`
+            <div class="log-row">
+              <div>
+                <span class="log-type ${l.type}">${l.type==='in'?'Clocked in':'Clocked out'}</span>
+                <div class="log-meta mono">${l.lat!=null ? l.lat.toFixed(4)+', '+l.lng.toFixed(4)+' · ±'+l.accuracy_m+'m' : 'location unavailable'}</div>
+              </div>
+              <div class="log-meta mono">${fmtDateTime(l.occurred_at)}</div>
+            </div>
+          `).join('')
+        }
+      </div>
+
+      <div class="card">
+        <h2>Sick leave <button class="small-btn" id="toggleLeaveForm" style="float:right;">${state.leaveForm?'Cancel':'+ Report'}</button></h2>
+        ${state.leaveForm ? `
+          <form class="leave-form" id="leaveForm">
+            <div class="field-row">
+              <div class="field"><label>Start date</label><input type="date" name="start" required /></div>
+              <div class="field"><label>End date</label><input type="date" name="end" required /></div>
+            </div>
+            <div class="field"><label>Reason</label><textarea name="reason" placeholder="Brief reason for leave" required></textarea></div>
+            <button type="submit" class="submit-btn">Submit request</button>
+          </form>
+        ` : (data.myLeaves.length===0 ? '<div class="empty">No leave requests filed.</div>' :
+          data.myLeaves.map(l=>`
+            <div class="log-row">
+              <div><span class="resident-name">${l.start_date} → ${l.end_date}</span><div class="log-meta">${l.reason}</div></div>
+              <span class="badge ${l.status}">${l.status}</span>
+            </div>
+          `).join('')
+        )}
+      </div>
+    </div>
+  `;
+  document.getElementById('clockBtn').onclick = ()=>clockAction(isOn?'out':'in');
+  document.getElementById('logoutBtn').onclick = signOut;
+  document.getElementById('toggleLeaveForm').onclick = ()=>{ state.leaveForm = !state.leaveForm; render(); };
+  const lf = document.getElementById('leaveForm');
+  if(lf) lf.onsubmit = submitLeave;
+}
+
+function renderDirector(){
+  const residentIds = Object.keys(data.profilesById).filter(id => data.profilesById[id].role === 'resident');
+  const onDutyCount = residentIds.filter(id => {
+    const logs = data.allLogs.filter(l=>l.resident_id===id);
+    const leaves = data.allLeaves.filter(l=>l.resident_id===id);
+    return residentStatus(logs, leaves) === 'on';
+  }).length;
+  const pendingLeaves = data.allLeaves.filter(s=>s.status==='pending');
+  const todayStr = new Date().toISOString().slice(0,10);
+  const todaysClockins = data.allLogs.filter(l=>l.type==='in' && l.occurred_at.slice(0,10)===todayStr).length;
+  const hasFacility = state.program && state.program.facility_lat != null && state.program.facility_lng != null;
+
+  root.innerHTML = `
+    ${topbar('Program director view')}
+    <div class="stat-row">
+      <div class="stat"><div class="num">${residentIds.length}</div><div class="label">Residents in program</div></div>
+      <div class="stat"><div class="num">${onDutyCount}</div><div class="label">Currently on duty</div></div>
+      <div class="stat"><div class="num">${todaysClockins}</div><div class="label">Clock-ins today</div></div>
+      <div class="stat"><div class="num">${pendingLeaves.length}</div><div class="label">Pending leave requests</div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:18px;">
+      <h2>Hospital location ${hasFacility ? `<button class="small-btn" id="toggleFacilityForm" style="float:right;">${state.facilityForm?'Cancel':'Edit'}</button>` : ''}</h2>
+      ${state.clockError ? `<div class="err" style="margin-bottom:10px;">${state.clockError}</div>` : ''}
+      ${(!hasFacility || state.facilityForm) ? `
+        <form class="leave-form" id="facilityForm">
+          <p style="font-size:13px;color:var(--slate);margin:0 0 4px;">Set the hospital's coordinates so off-site clock-ins/outs can be flagged automatically.</p>
+          <div class="field-row">
+            <div class="field"><label>Latitude</label><input type="text" name="lat" value="${state.program?.facility_lat ?? ''}" required /></div>
+            <div class="field"><label>Longitude</label><input type="text" name="lng" value="${state.program?.facility_lng ?? ''}" required /></div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;">
+            <button type="submit" class="submit-btn">Save location</button>
+            <button type="button" class="small-btn" id="useCurrentLocBtn">Use my current location</button>
+          </div>
+        </form>
+      ` : `
+        <div class="log-meta mono">${state.program.facility_lat.toFixed(5)}, ${state.program.facility_lng.toFixed(5)} · clock events beyond ${GEOFENCE_RADIUS_M}m are flagged</div>
+      `}
+    </div>
+
+    <div class="card" style="margin-bottom:18px;">
+      <h2>Resident status <span class="count">live</span></h2>
+      ${residentIds.length===0 ? '<div class="empty">No residents have signed up yet.</div>' : `
+      <table>
+        <tr><th></th><th>Resident</th><th>Status</th><th>Last event</th><th>Hours this week</th><th>Days this month</th><th>Location</th><th>Flags</th></tr>
+        ${residentIds.map(id=>{
+          const logs = data.allLogs.filter(l=>l.resident_id===id).sort((a,b)=>new Date(b.occurred_at)-new Date(a.occurred_at));
+          const logsAsc = [...logs].sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+          const riskFlags = computeRiskFlags(logsAsc);
+          const flaggedCount = logs.filter(l=>hasAnyFlag(riskFlags[l.id])).length;
+          const leaves = data.allLeaves.filter(l=>l.resident_id===id);
+          const status = residentStatus(logs, leaves);
+          const last = logs[0];
+          const hours = hoursThisWeek(logs);
+          const overLimit = hours >= 80;
+          const daysWorked = daysWorkedThisMonth(logs);
+          const expanded = state.expandedResidentId === id;
+          const lastDist = (hasFacility && last && last.lat!=null) ? distanceMeters(last.lat,last.lng,state.program.facility_lat,state.program.facility_lng) : null;
+          const lastOffSite = lastDist != null && lastDist > GEOFENCE_RADIUS_M;
+          const rowsHtml = `<tr class="resident-row" data-id="${id}" style="cursor:pointer;">
+            <td style="width:16px;color:var(--slate-light);">${expanded ? '▾' : '▸'}</td>
+            <td class="resident-name">${data.profilesById[id].full_name}</td>
+            <td><span class="pill ${status}" style="margin:0;"><span class="dot"></span>${status==='on'?'On duty':status==='leave'?'On leave':'Off duty'}</span></td>
+            <td class="mono">${last ? (last.type==='in' ? 'Clocked in' : 'Clocked out') + ' · ' + fmtDateTime(last.occurred_at) : '—'}</td>
+            <td class="mono" style="${overLimit ? 'color:var(--red);font-weight:600;' : ''}">${hours.toFixed(1)}h${overLimit ? ' ⚠' : ''}</td>
+            <td class="mono">${daysWorked}</td>
+            <td class="coords mono" style="${lastOffSite ? 'color:var(--red);font-weight:600;' : ''}">${last ? (last.lat!=null ? last.lat.toFixed(4)+', '+last.lng.toFixed(4) + (lastDist!=null ? ' ('+Math.round(lastDist)+'m'+(lastOffSite?' ⚠ off-site':'')+')' : '') : 'unavailable') : '—'}</td>
+            <td>${flaggedCount>0 ? `<span class="badge denied">${flaggedCount} flagged</span>` : '<span class="log-meta">—</span>'}</td>
+          </tr>`;
+          const detailHtml = expanded ? `<tr><td></td><td colspan="7" style="padding:0;">
+            <div style="background:var(--cream);border-radius:8px;padding:14px 16px;margin:4px 0 12px;">
+              ${logs.length===0 ? '<div class="empty">No clock events recorded.</div>' :
+                logs.map(l=>{
+                  const dist = (hasFacility && l.lat!=null) ? distanceMeters(l.lat,l.lng,state.program.facility_lat,state.program.facility_lng) : null;
+                  const offSite = dist != null && dist > GEOFENCE_RADIUS_M;
+                  const rf = riskFlags[l.id] || {};
+                  const badges = [];
+                  if(rf.accuracySuspicious) badges.push('<span class="badge denied">Unusually precise GPS</span>');
+                  if(rf.ipMismatchKm) badges.push(`<span class="badge denied">${Math.round(rf.ipMismatchKm)}km from IP location</span>`);
+                  if(rf.impossibleSpeedKmh) badges.push(`<span class="badge denied">${Math.round(rf.impossibleSpeedKmh)}km/h since last event</span>`);
+                  return `
+                  <div class="log-row" style="display:block;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                      <div>
+                        <span class="log-type ${l.type}">${l.type==='in'?'Clocked in':'Clocked out'}</span>
+                        <div class="log-meta mono" style="${offSite ? 'color:var(--red);' : ''}">${l.lat!=null ? l.lat.toFixed(5)+', '+l.lng.toFixed(5)+' · ±'+l.accuracy_m+'m accuracy' + (dist!=null ? ' · '+Math.round(dist)+'m from hospital'+(offSite?' ⚠ off-site':'') : '') : 'location unavailable'}</div>
+                        ${l.ip_address ? `<div class="log-meta mono">IP ${l.ip_address}${l.ip_lat!=null ? ' ('+l.ip_lat.toFixed(2)+', '+l.ip_lng.toFixed(2)+')' : ''}</div>` : ''}
+                      </div>
+                      <div class="log-meta mono">${fmtDateTime(l.occurred_at)}</div>
+                    </div>
+                    ${badges.length ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${badges.join('')}</div>` : ''}
+                  </div>
+                `;
+                }).join('')
+              }
+            </div>
+          </td></tr>` : '';
+          return rowsHtml + detailHtml;
+        }).join('')}
+      </table>`}
+    </div>
+
+    <div class="card">
+      <h2>Sick leave requests <span class="count">${pendingLeaves.length} pending</span></h2>
+      ${data.allLeaves.length===0 ? '<div class="empty">No leave requests filed yet.</div>' : `
+      <table>
+        <tr><th>Resident</th><th>Dates</th><th>Reason</th><th>Status</th><th></th></tr>
+        ${data.allLeaves.map(s=>`
+          <tr>
+            <td class="resident-name">${data.profilesById[s.resident_id]?.full_name || '—'}</td>
+            <td class="mono">${s.start_date} → ${s.end_date}</td>
+            <td>${s.reason}</td>
+            <td><span class="badge ${s.status}">${s.status}</span></td>
+            <td>${s.status==='pending' ? `
+              <button class="small-btn approve" data-id="${s.id}" data-action="approved">Approve</button>
+              <button class="small-btn deny" data-id="${s.id}" data-action="denied">Deny</button>
+            ` : ''}</td>
+          </tr>
+        `).join('')}
+      </table>`}
+    </div>
+  `;
+  document.getElementById('logoutBtn').onclick = signOut;
+  const facForm = document.getElementById('facilityForm');
+  if(facForm) facForm.onsubmit = saveFacilityLocation;
+  const toggleFacBtn = document.getElementById('toggleFacilityForm');
+  if(toggleFacBtn) toggleFacBtn.onclick = ()=>{ state.facilityForm = !state.facilityForm; render(); };
+  const useLocBtn = document.getElementById('useCurrentLocBtn');
+  if(useLocBtn) useLocBtn.onclick = useCurrentLocationForFacility;
+  document.querySelectorAll('.resident-row').forEach(row=>{
+    row.onclick = ()=>{
+      const id = row.dataset.id;
+      state.expandedResidentId = (state.expandedResidentId === id) ? null : id;
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action]').forEach(b=>{
+    b.onclick = (e)=>{
+      e.stopPropagation();
+      setLeaveStatus(b.dataset.id, b.dataset.action);
+    };
+  });
+}
+
+(async function init(){
+  render();
+  await refreshSession();
+  await loadAllData();
+  render();
+  setInterval(()=>{ if(state.profile?.role==='resident') render(); }, 1000);
+})();
+</script>
+</body>
+</html>
