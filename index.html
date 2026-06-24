@@ -10,7 +10,7 @@
 
   :root{
     --teal-900:#102E2F; --teal-700:#1F4B4D; --teal-500:#2E6B6E;
-    --cream:#F7F5F0; --paper:#FFFFFF; --slate:#44514F; --slate-light:#7C8985;
+    --cream:#F7F5F0; --paper:#FFFFFF; --slate:#44514F; --slate-light:#5C6764;
     --amber:#D98E04; --amber-soft:#FBE8C6; --green:#4C8C6B; --green-soft:#DCEEE3;
     --red:#C1554A; --red-soft:#F6DEDA; --line:#E2DFD6; --radius:10px;
   }
@@ -52,9 +52,9 @@
   .clock-date{font-size:12.5px;color:#9FB6B4;margin-top:2px;}
   .pill{display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:99px;font-size:12.5px;font-weight:600;margin-top:10px;}
   .pill .dot{width:7px;height:7px;border-radius:50%;}
-  .pill.on{background:rgba(76,140,107,.22);color:#9FE0BC;} .pill.on .dot{background:#5FD491;}
-  .pill.off{background:rgba(124,137,133,.22);color:#C9D6D3;} .pill.off .dot{background:#9FB6B4;}
-  .pill.leave{background:rgba(217,142,4,.22);color:#FFCD7A;} .pill.leave .dot{background:#FFCD7A;}
+  .pill.on{background:#2E9D63;color:#fff;} .pill.on .dot{background:#fff;}
+  .pill.off{background:#6E7A77;color:#fff;} .pill.off .dot{background:#fff;}
+  .pill.leave{background:#C97D05;color:#fff;} .pill.leave .dot{background:#fff;}
   .clock-action button{font-family:'Space Grotesk';font-weight:700;font-size:15px;padding:14px 26px;border-radius:10px;border:none;cursor:pointer;}
   .btn-in{background:var(--green);color:#fff;} .btn-in:hover{background:#3d765a;}
   .btn-out{background:var(--red);color:#fff;} .btn-out:hover{background:#a8453b;}
@@ -112,6 +112,13 @@
   }
   .hero-banner .hero-text .hero-title{font-family:'Space Grotesk';font-weight:700;font-size:18px;letter-spacing:.2px;}
   .hero-banner .hero-text .hero-sub{font-size:12px;color:#D8E6E4;margin-top:2px;}
+  .month-folder{margin-bottom:8px;}
+  .month-folder-header{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--paper);border:1px solid var(--line);border-radius:7px;cursor:pointer;}
+  .month-folder-header:hover{border-color:var(--teal-500);}
+  .month-folder-arrow{color:var(--slate-light);font-size:11px;width:10px;}
+  .month-folder-title{font-family:'Space Grotesk';font-weight:600;font-size:13px;flex:1;}
+  .month-folder-count{font-size:11.5px;color:var(--slate-light);}
+  .month-folder-body{padding:4px 10px 2px;}
   .loading-screen{text-align:center;padding:80px 0;color:var(--slate-light);font-size:13px;}
 </style>
 </head>
@@ -129,7 +136,7 @@ const PROGRAM_ID = 'db507be1-a3a3-4c7e-ae46-7b08babc1468';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const root = document.getElementById('app');
-let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null };
+let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null, monthOverrides:{} };
 let data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{} };
 
 function fmtTime(ts){ return new Date(ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
@@ -198,7 +205,7 @@ async function signIn(e){
 
 async function signOut(){
   await sb.auth.signOut();
-  state = { loading:false, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null };
+  state = { loading:false, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null, monthOverrides:{} };
   data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{} };
   render();
 }
@@ -363,17 +370,40 @@ function hasAnyFlag(f){
 const MAX_CONSECUTIVE_HOURS = 24;   // ACGME: 24h continuous duty limit (+4h transition allowed separately)
 const MIN_REST_HOURS = 8;           // ACGME: minimum time off between duty periods
 
+// Groups a list of logs (any order) into month "folders", newest first.
+// Each folder key is stable (YYYY-M) so expand/collapse state survives re-renders.
+function groupLogsByMonth(logs){
+  const groups = {};
+  for(const l of logs){
+    const d = new Date(l.occurred_at);
+    const key = d.getFullYear() + '-' + d.getMonth();
+    if(!groups[key]) groups[key] = { key, label: d.toLocaleDateString([], {month:'long', year:'numeric'}), logs: [] };
+    groups[key].logs.push(l);
+  }
+  return Object.values(groups).sort((a,b)=> b.key.localeCompare(a.key, undefined, {numeric:true}));
+}
+
 function pairShifts(logsAsc){
   const shifts = [];
   let openIn = null;
   for(const l of logsAsc){
-    if(l.type === 'in') openIn = new Date(l.occurred_at);
+    if(l.type === 'in') openIn = { time: new Date(l.occurred_at), log: l };
     else if(l.type === 'out' && openIn){
-      shifts.push({ start: openIn, end: new Date(l.occurred_at) });
+      shifts.push({ start: openIn.time, end: new Date(l.occurred_at), startLog: openIn.log, endLog: l });
       openIn = null;
     }
   }
   return shifts;
+}
+
+// Returns a map of clock-out log id -> shift duration in hours, for displaying
+// "this shift was X hours" next to each clock-out without the viewer doing math.
+function shiftDurationsByOutId(logsAsc){
+  const map = {};
+  for(const s of pairShifts(logsAsc)){
+    map[s.endLog.id] = (s.end - s.start) / 3600000;
+  }
+  return map;
 }
 
 function acgmeViolationsThisWeek(logsAsc){
@@ -702,6 +732,9 @@ function renderResident(){
   const status = residentStatus(data.myLogs, data.myLeaves);
   const isOn = status==='on';
   const now = new Date();
+  const myLogsAsc = [...data.myLogs].sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+  const myShiftDurations = shiftDurationsByOutId(myLogsAsc);
+  const myHoursThisWeek = hoursThisWeek(data.myLogs);
   root.innerHTML = `
     ${topbar('Resident view')}
     <div class="clock-card">
@@ -721,12 +754,13 @@ function renderResident(){
 
     <div class="grid">
       <div class="card">
-        <h2>Recent activity <span class="count">${data.myLogs.length} entries</span></h2>
+        <h2>Recent activity <span class="count">${myHoursThisWeek.toFixed(1)}h this week</span></h2>
         ${data.myLogs.length===0 ? '<div class="empty">No clock events yet.</div>' :
           data.myLogs.slice(0,8).map(l=>`
             <div class="log-row">
               <div>
                 <span class="log-type ${l.type}">${l.type==='in'?'Clocked in':'Clocked out'}</span>
+                ${(l.type==='out' && myShiftDurations[l.id]!=null) ? `<span class="badge approved" style="margin-left:6px;">${myShiftDurations[l.id].toFixed(1)}h shift</span>` : ''}
                 ${l.auto_closed ? `<span class="badge pending" style="margin-left:6px;">Auto-closed</span>` : ''}
                 <div class="log-meta mono">${l.lat!=null ? l.lat.toFixed(4)+', '+l.lng.toFixed(4)+' · ±'+l.accuracy_m+'m' : (l.auto_closed ? 'no location (system event)' : 'location unavailable')}</div>
               </div>
@@ -821,6 +855,7 @@ function renderDirector(){
           const logs = data.allLogs.filter(l=>l.resident_id===id).sort((a,b)=>new Date(b.occurred_at)-new Date(a.occurred_at));
           const logsAsc = [...logs].sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
           const riskFlags = computeRiskFlags(logsAsc);
+          const shiftDurations = shiftDurationsByOutId(logsAsc);
           const flaggedCount = logs.filter(l=>hasAnyFlag(riskFlags[l.id])).length;
           const leaves = data.allLeaves.filter(l=>l.resident_id===id);
           const status = residentStatus(logs, leaves);
@@ -841,29 +876,46 @@ function renderDirector(){
             <td class="coords mono" style="${lastOffSite ? 'color:var(--red);font-weight:600;' : ''}">${last ? (last.lat!=null ? last.lat.toFixed(4)+', '+last.lng.toFixed(4) + (lastDist!=null ? ' ('+Math.round(lastDist)+'m'+(lastOffSite?' ⚠ off-site':'')+')' : '') : 'unavailable') : '—'}</td>
             <td>${flaggedCount>0 ? `<span class="badge denied">${flaggedCount} flagged</span>` : '<span class="log-meta">—</span>'}</td>
           </tr>`;
+          const monthGroups = groupLogsByMonth(logs);
           const detailHtml = expanded ? `<tr><td></td><td colspan="7" style="padding:0;">
             <div style="background:var(--cream);border-radius:8px;padding:14px 16px;margin:4px 0 12px;">
               ${logs.length===0 ? '<div class="empty">No clock events recorded.</div>' :
-                logs.map(l=>{
-                  const dist = (hasFacility && l.lat!=null) ? distanceMeters(l.lat,l.lng,state.program.facility_lat,state.program.facility_lng) : null;
-                  const offSite = dist != null && dist > GEOFENCE_RADIUS_M;
-                  const rf = riskFlags[l.id] || {};
-                  const badges = [];
-                  if(rf.accuracySuspicious) badges.push('<span class="badge denied">Unusually precise GPS</span>');
-                  if(rf.ipMismatchKm) badges.push(`<span class="badge denied">${Math.round(rf.ipMismatchKm)}km from IP location</span>`);
-                  if(rf.impossibleSpeedKmh) badges.push(`<span class="badge denied">${Math.round(rf.impossibleSpeedKmh)}km/h since last event</span>`);
+                monthGroups.map((group, gi)=>{
+                  const folderKey = id + '::' + group.key;
+                  const isOpen = (folderKey in state.monthOverrides) ? state.monthOverrides[folderKey] : (gi === 0);
                   return `
-                  <div class="log-row" style="display:block;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                      <div>
-                        <span class="log-type ${l.type}">${l.type==='in'?'Clocked in':'Clocked out'}</span>
-                        ${l.auto_closed ? `<span class="badge pending" style="margin-left:6px;">Auto-closed at ${AUTO_CLOCKOUT_HOURS}h limit</span>` : ''}
-                        <div class="log-meta mono" style="${offSite ? 'color:var(--red);' : ''}">${l.lat!=null ? l.lat.toFixed(5)+', '+l.lng.toFixed(5)+' · ±'+l.accuracy_m+'m accuracy' + (dist!=null ? ' · '+Math.round(dist)+'m from hospital'+(offSite?' ⚠ off-site':'') : '') : (l.auto_closed ? 'system-generated, no location' : 'location unavailable')}</div>
-                        ${l.ip_address ? `<div class="log-meta mono">IP ${l.ip_address}${l.ip_lat!=null ? ' ('+l.ip_lat.toFixed(2)+', '+l.ip_lng.toFixed(2)+')' : ''}</div>` : ''}
-                      </div>
-                      <div class="log-meta mono">${fmtDateTime(l.occurred_at)}</div>
+                  <div class="month-folder">
+                    <div class="month-folder-header" data-folder-key="${folderKey}">
+                      <span class="month-folder-arrow">${isOpen ? '▾' : '▸'}</span>
+                      <span class="month-folder-title">${group.label}</span>
+                      <span class="month-folder-count">${group.logs.length} event${group.logs.length===1?'':'s'}</span>
                     </div>
-                    ${badges.length ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${badges.join('')}</div>` : ''}
+                    ${isOpen ? `<div class="month-folder-body">
+                      ${group.logs.map(l=>{
+                        const dist = (hasFacility && l.lat!=null) ? distanceMeters(l.lat,l.lng,state.program.facility_lat,state.program.facility_lng) : null;
+                        const offSite = dist != null && dist > GEOFENCE_RADIUS_M;
+                        const rf = riskFlags[l.id] || {};
+                        const badges = [];
+                        if(rf.accuracySuspicious) badges.push('<span class="badge denied">Unusually precise GPS</span>');
+                        if(rf.ipMismatchKm) badges.push(`<span class="badge denied">${Math.round(rf.ipMismatchKm)}km from IP location</span>`);
+                        if(rf.impossibleSpeedKmh) badges.push(`<span class="badge denied">${Math.round(rf.impossibleSpeedKmh)}km/h since last event</span>`);
+                        return `
+                        <div class="log-row" style="display:block;">
+                          <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <div>
+                              <span class="log-type ${l.type}">${l.type==='in'?'Clocked in':'Clocked out'}</span>
+                              ${(l.type==='out' && shiftDurations[l.id]!=null) ? `<span class="badge approved" style="margin-left:6px;">${shiftDurations[l.id].toFixed(1)}h shift</span>` : ''}
+                              ${l.auto_closed ? `<span class="badge pending" style="margin-left:6px;">Auto-closed at ${AUTO_CLOCKOUT_HOURS}h limit</span>` : ''}
+                              <div class="log-meta mono" style="${offSite ? 'color:var(--red);' : ''}">${l.lat!=null ? l.lat.toFixed(5)+', '+l.lng.toFixed(5)+' · ±'+l.accuracy_m+'m accuracy' + (dist!=null ? ' · '+Math.round(dist)+'m from hospital'+(offSite?' ⚠ off-site':'') : '') : (l.auto_closed ? 'system-generated, no location' : 'location unavailable')}</div>
+                              ${l.ip_address ? `<div class="log-meta mono">IP ${l.ip_address}${l.ip_lat!=null ? ' ('+l.ip_lat.toFixed(2)+', '+l.ip_lng.toFixed(2)+')' : ''}</div>` : ''}
+                            </div>
+                            <div class="log-meta mono">${fmtDateTime(l.occurred_at)}</div>
+                          </div>
+                          ${badges.length ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${badges.join('')}</div>` : ''}
+                        </div>
+                      `;
+                      }).join('')}
+                    </div>` : ''}
                   </div>
                 `;
                 }).join('')
@@ -918,6 +970,18 @@ function renderDirector(){
     b.onclick = (e)=>{
       e.stopPropagation();
       setLeaveStatus(b.dataset.id, b.dataset.action);
+    };
+  });
+  document.querySelectorAll('.month-folder-header').forEach(h=>{
+    h.onclick = (e)=>{
+      e.stopPropagation();
+      const key = h.dataset.folderKey;
+      const currentlyOpen = (key in state.monthOverrides) ? state.monthOverrides[key] : false;
+      // We don't know here whether this was the "default open" first folder, so just toggle
+      // based on what's currently rendered (the arrow tells us — ▾ means open).
+      const wasOpen = h.querySelector('.month-folder-arrow').textContent === '▾';
+      state.monthOverrides[key] = !wasOpen;
+      render();
     };
   });
 }
