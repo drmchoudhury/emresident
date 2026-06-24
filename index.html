@@ -323,6 +323,65 @@ function hasAnyFlag(f){
   return !!(f && (f.accuracySuspicious || f.ipMismatchKm || f.impossibleSpeedKmh));
 }
 
+// ACGME duty-hour compliance checks, computed from chronologically-ordered (oldest first) logs.
+// These are heuristic checks based on clock data only — they don't replace a program's
+// official duty-hour attestation process, but surface likely violations for review.
+const MAX_CONSECUTIVE_HOURS = 24;   // ACGME: 24h continuous duty limit (+4h transition allowed separately)
+const MIN_REST_HOURS = 8;           // ACGME: minimum time off between duty periods
+
+function pairShifts(logsAsc){
+  const shifts = [];
+  let openIn = null;
+  for(const l of logsAsc){
+    if(l.type === 'in') openIn = new Date(l.occurred_at);
+    else if(l.type === 'out' && openIn){
+      shifts.push({ start: openIn, end: new Date(l.occurred_at) });
+      openIn = null;
+    }
+  }
+  return shifts;
+}
+
+function acgmeViolationsThisWeek(logsAsc){
+  const weekStart = startOfWeek();
+  const shifts = pairShifts(logsAsc);
+  const violations = [];
+
+  for(const s of shifts){
+    if(s.end < weekStart) continue;
+    const hrs = (s.end - s.start) / 3600000;
+    if(hrs > MAX_CONSECUTIVE_HOURS){
+      violations.push(`Shift of ${hrs.toFixed(1)}h exceeds the ${MAX_CONSECUTIVE_HOURS}h continuous-duty limit (ended ${fmtDateTime(s.end)})`);
+    }
+  }
+
+  for(let i=1;i<shifts.length;i++){
+    if(shifts[i].start < weekStart) continue;
+    const restHrs = (shifts[i].start - shifts[i-1].end) / 3600000;
+    if(restHrs < MIN_REST_HOURS){
+      violations.push(`Only ${restHrs.toFixed(1)}h rest before shift starting ${fmtDateTime(shifts[i].start)} (minimum ${MIN_REST_HOURS}h)`);
+    }
+  }
+
+  const todayIdx = Math.floor((Date.now() - weekStart.getTime()) / 86400000);
+  const workedDays = new Set();
+  shifts.forEach(s=>{
+    let d = new Date(s.start); d.setHours(0,0,0,0);
+    const endDay = new Date(s.end); endDay.setHours(0,0,0,0);
+    while(d <= endDay){ workedDays.add(d.toISOString().slice(0,10)); d.setDate(d.getDate()+1); }
+  });
+  let hasDayOff = false;
+  for(let i=0;i<=todayIdx && i<7;i++){
+    const d = new Date(weekStart); d.setDate(d.getDate()+i);
+    if(!workedDays.has(d.toISOString().slice(0,10))){ hasDayOff = true; break; }
+  }
+  if(!hasDayOff && todayIdx >= 6){
+    violations.push('No day off so far this week (ACGME requires one day in seven free of duty)');
+  }
+
+  return violations;
+}
+
 function daysWorkedThisMonth(logs){
   if(!logs || logs.length===0) return 0;
   const now = new Date();
@@ -336,6 +395,42 @@ function daysWorkedThisMonth(logs){
     }
   }
   return days.size;
+}
+
+function downloadCsv(filename, rows){
+  const csv = rows.map(row => row.map(cell => {
+    const s = (cell == null) ? '' : String(cell);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+  }).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportTimeLogsCsv(){
+  const rows = [['Resident','Type','Date/Time','Latitude','Longitude','Accuracy (m)','IP Address','Distance from hospital (m)']];
+  data.allLogs.forEach(l=>{
+    const dist = (state.program?.facility_lat!=null && l.lat!=null) ? Math.round(distanceMeters(l.lat,l.lng,state.program.facility_lat,state.program.facility_lng)) : '';
+    rows.push([
+      data.profilesById[l.resident_id]?.full_name || l.resident_id,
+      l.type, l.occurred_at, l.lat ?? '', l.lng ?? '', l.accuracy_m ?? '', l.ip_address ?? '', dist
+    ]);
+  });
+  downloadCsv(`time-logs-${new Date().toISOString().slice(0,10)}.csv`, rows);
+}
+
+function exportLeaveCsv(){
+  const rows = [['Resident','Start date','End date','Reason','Status','Submitted at','Reviewed at']];
+  data.allLeaves.forEach(s=>{
+    rows.push([
+      data.profilesById[s.resident_id]?.full_name || s.resident_id,
+      s.start_date, s.end_date, s.reason, s.status, s.created_at, s.reviewed_at ?? ''
+    ]);
+  });
+  downloadCsv(`sick-leave-${new Date().toISOString().slice(0,10)}.csv`, rows);
 }
 
 function residentStatus(logs, leaves){
@@ -625,6 +720,11 @@ function renderDirector(){
       <div class="stat"><div class="num">${pendingLeaves.length}</div><div class="label">Pending leave requests</div></div>
     </div>
 
+    <div style="display:flex;gap:10px;margin-bottom:18px;">
+      <button class="small-btn" id="exportLogsBtn">⬇ Export time logs (CSV)</button>
+      <button class="small-btn" id="exportLeaveBtn">⬇ Export leave requests (CSV)</button>
+    </div>
+
     <div class="card" style="margin-bottom:18px;">
       <h2>Hospital location ${hasFacility ? `<button class="small-btn" id="toggleFacilityForm" style="float:right;">${state.facilityForm?'Cancel':'Edit'}</button>` : ''}</h2>
       ${state.clockError ? `<div class="err" style="margin-bottom:10px;">${state.clockError}</div>` : ''}
@@ -732,6 +832,8 @@ function renderDirector(){
     </div>
   `;
   document.getElementById('logoutBtn').onclick = signOut;
+  document.getElementById('exportLogsBtn').onclick = exportTimeLogsCsv;
+  document.getElementById('exportLeaveBtn').onclick = exportLeaveCsv;
   const facForm = document.getElementById('facilityForm');
   if(facForm) facForm.onsubmit = saveFacilityLocation;
   const toggleFacBtn = document.getElementById('toggleFacilityForm');
