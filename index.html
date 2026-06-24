@@ -115,7 +115,7 @@ const PROGRAM_ID = 'db507be1-a3a3-4c7e-ae46-7b08babc1468';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const root = document.getElementById('app');
-let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null };
+let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null };
 let data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{} };
 
 function fmtTime(ts){ return new Date(ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
@@ -184,7 +184,7 @@ async function signIn(e){
 
 async function signOut(){
   await sb.auth.signOut();
-  state = { loading:false, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null };
+  state = { loading:false, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null };
   data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{} };
   render();
 }
@@ -197,13 +197,33 @@ async function loadAllData(){
   const { data: prog } = await sb.from('programs').select('*').eq('id', PROGRAM_ID).single();
   state.program = prog || null;
   if(state.profile.role === 'resident'){
-    const { data: logs } = await sb.from('time_logs').select('*').eq('resident_id', state.user.id).order('occurred_at', {ascending:false});
-    data.myLogs = logs || [];
+    state.autoCloseNotice = null;
+    let { data: logs } = await sb.from('time_logs').select('*').eq('resident_id', state.user.id).order('occurred_at', {ascending:false});
+    logs = logs || [];
+    const closeoutTime = await autoCloseStaleShift([...logs].reverse(), state.user.id);
+    if(closeoutTime){
+      state.autoCloseNotice = `You were automatically clocked out at ${fmtDateTime(closeoutTime)} after reaching the ${AUTO_CLOCKOUT_HOURS}-hour limit. If you're still on shift, please clock back in.`;
+      const refetch = await sb.from('time_logs').select('*').eq('resident_id', state.user.id).order('occurred_at', {ascending:false});
+      logs = refetch.data || logs;
+    }
+    data.myLogs = logs;
     const { data: leaves } = await sb.from('sick_leaves').select('*').eq('resident_id', state.user.id).order('created_at', {ascending:false});
     data.myLeaves = leaves || [];
   } else {
-    const { data: logs } = await sb.from('time_logs').select('*').eq('program_id', PROGRAM_ID).order('occurred_at', {ascending:false});
-    data.allLogs = logs || [];
+    let { data: logs } = await sb.from('time_logs').select('*').eq('program_id', PROGRAM_ID).order('occurred_at', {ascending:false});
+    logs = logs || [];
+    const residentIdsInLogs = [...new Set(logs.map(l=>l.resident_id))];
+    let anyClosed = false;
+    for(const rid of residentIdsInLogs){
+      const residentLogsAsc = logs.filter(l=>l.resident_id===rid).sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+      const closed = await autoCloseStaleShift(residentLogsAsc, rid);
+      if(closed) anyClosed = true;
+    }
+    if(anyClosed){
+      const refetch = await sb.from('time_logs').select('*').eq('program_id', PROGRAM_ID).order('occurred_at', {ascending:false});
+      logs = refetch.data || logs;
+    }
+    data.allLogs = logs;
     const { data: leaves } = await sb.from('sick_leaves').select('*').eq('program_id', PROGRAM_ID).order('created_at', {ascending:false});
     data.allLeaves = leaves || [];
     const { data: profs } = await sb.from('profiles').select('*').eq('program_id', PROGRAM_ID);
@@ -433,6 +453,30 @@ function exportLeaveCsv(){
   downloadCsv(`sick-leave-${new Date().toISOString().slice(0,10)}.csv`, rows);
 }
 
+const AUTO_CLOCKOUT_HOURS = 12; // open shifts longer than this are automatically closed out
+
+// Checks a chronologically-ordered (oldest first) log list for an open clock-in older
+// than AUTO_CLOCKOUT_HOURS, and if found, inserts a system-generated clock-out at
+// exactly the limit. Returns the closeout Date if one was created, otherwise null.
+async function autoCloseStaleShift(logsAsc, residentId){
+  if(!logsAsc || logsAsc.length === 0) return null;
+  const last = logsAsc[logsAsc.length - 1];
+  if(last.type !== 'in') return null;
+  const hoursOpen = (Date.now() - new Date(last.occurred_at).getTime()) / 3600000;
+  if(hoursOpen < AUTO_CLOCKOUT_HOURS) return null;
+  const closeoutTime = new Date(new Date(last.occurred_at).getTime() + AUTO_CLOCKOUT_HOURS*3600000);
+  await sb.from('time_logs').insert({
+    resident_id: residentId,
+    program_id: PROGRAM_ID,
+    type: 'out',
+    occurred_at: closeoutTime.toISOString(),
+    lat: null, lng: null, accuracy_m: null,
+    ip_address: null, ip_lat: null, ip_lng: null,
+    auto_closed: true
+  });
+  return closeoutTime;
+}
+
 function residentStatus(logs, leaves){
   const today = new Date().toISOString().slice(0,10);
   const onLeaveToday = (leaves||[]).some(s => s.status==='approved' && s.start_date<=today && today<=s.end_date);
@@ -652,6 +696,7 @@ function renderResident(){
       </div>
     </div>
     ${state.clockError ? `<div class="err">${state.clockError}</div>` : ''}
+    ${state.autoCloseNotice ? `<div class="err" style="background:var(--amber-soft);color:#8A5A02;">${state.autoCloseNotice}</div>` : ''}
     ${state.ipDebug ? `<div class="log-meta mono" style="margin-top:6px;">${state.ipDebug}</div>` : ''}
 
     <div class="grid">
@@ -662,7 +707,8 @@ function renderResident(){
             <div class="log-row">
               <div>
                 <span class="log-type ${l.type}">${l.type==='in'?'Clocked in':'Clocked out'}</span>
-                <div class="log-meta mono">${l.lat!=null ? l.lat.toFixed(4)+', '+l.lng.toFixed(4)+' · ±'+l.accuracy_m+'m' : 'location unavailable'}</div>
+                ${l.auto_closed ? `<span class="badge pending" style="margin-left:6px;">Auto-closed</span>` : ''}
+                <div class="log-meta mono">${l.lat!=null ? l.lat.toFixed(4)+', '+l.lng.toFixed(4)+' · ±'+l.accuracy_m+'m' : (l.auto_closed ? 'no location (system event)' : 'location unavailable')}</div>
               </div>
               <div class="log-meta mono">${fmtDateTime(l.occurred_at)}</div>
             </div>
@@ -791,7 +837,8 @@ function renderDirector(){
                     <div style="display:flex;justify-content:space-between;align-items:center;">
                       <div>
                         <span class="log-type ${l.type}">${l.type==='in'?'Clocked in':'Clocked out'}</span>
-                        <div class="log-meta mono" style="${offSite ? 'color:var(--red);' : ''}">${l.lat!=null ? l.lat.toFixed(5)+', '+l.lng.toFixed(5)+' · ±'+l.accuracy_m+'m accuracy' + (dist!=null ? ' · '+Math.round(dist)+'m from hospital'+(offSite?' ⚠ off-site':'') : '') : 'location unavailable'}</div>
+                        ${l.auto_closed ? `<span class="badge pending" style="margin-left:6px;">Auto-closed at ${AUTO_CLOCKOUT_HOURS}h limit</span>` : ''}
+                        <div class="log-meta mono" style="${offSite ? 'color:var(--red);' : ''}">${l.lat!=null ? l.lat.toFixed(5)+', '+l.lng.toFixed(5)+' · ±'+l.accuracy_m+'m accuracy' + (dist!=null ? ' · '+Math.round(dist)+'m from hospital'+(offSite?' ⚠ off-site':'') : '') : (l.auto_closed ? 'system-generated, no location' : 'location unavailable')}</div>
                         ${l.ip_address ? `<div class="log-meta mono">IP ${l.ip_address}${l.ip_lat!=null ? ' ('+l.ip_lat.toFixed(2)+', '+l.ip_lng.toFixed(2)+')' : ''}</div>` : ''}
                       </div>
                       <div class="log-meta mono">${fmtDateTime(l.occurred_at)}</div>
