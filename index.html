@@ -87,6 +87,8 @@
   .badge.approved{background:var(--green-soft);color:#2F6A4A;}
   .badge.denied{background:var(--red-soft);color:#8E332A;}
   table{width:100%;border-collapse:collapse;font-size:13px;}
+  .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -2px;}
+  .table-scroll table{min-width:640px;}
   th{text-align:left;font-size:11px;color:var(--slate-light);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line);text-transform:uppercase;letter-spacing:.3px;}
   td{padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:top;}
   tr:last-child td{border-bottom:none;}
@@ -113,7 +115,7 @@ const PROGRAM_ID = 'db507be1-a3a3-4c7e-ae46-7b08babc1468';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const root = document.getElementById('app');
-let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false };
+let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null };
 let data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{} };
 
 function fmtTime(ts){ return new Date(ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
@@ -182,7 +184,7 @@ async function signIn(e){
 
 async function signOut(){
   await sb.auth.signOut();
-  state = { loading:false, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null };
+  state = { loading:false, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null };
   data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{} };
   render();
 }
@@ -248,9 +250,10 @@ function distanceMeters(lat1, lng1, lat2, lng2){
 // Used as an independent cross-check against the GPS coordinates — a large mismatch
 // can indicate the GPS reading was spoofed (e.g. a fake-location app) or the device is
 // connecting through a remote network for some other reason.
+let lastIpLookupError = null;
+
 async function lookupIpLocation(){
-  // Try ipapi.co first, fall back to ipwho.is if it fails — different free IP-geolocation
-  // providers sometimes rate-limit or reject requests from certain origins.
+  lastIpLookupError = null;
   try{
     const controller = new AbortController();
     const timeout = setTimeout(()=>controller.abort(), 4000);
@@ -261,9 +264,12 @@ async function lookupIpLocation(){
       if(json && !json.error && json.latitude != null){
         return { ip: json.ip, lat: json.latitude, lng: json.longitude };
       }
+      lastIpLookupError = 'ipapi.co: ' + (json?.reason || 'unexpected response');
+    } else {
+      lastIpLookupError = 'ipapi.co: HTTP ' + res.status;
     }
   }catch(e){
-    console.warn('ipapi.co lookup failed:', e);
+    lastIpLookupError = 'ipapi.co: ' + e.message;
   }
   try{
     const controller = new AbortController();
@@ -275,9 +281,12 @@ async function lookupIpLocation(){
       if(json && json.success !== false){
         return { ip: json.ip, lat: json.latitude, lng: json.longitude };
       }
+      lastIpLookupError += ' / ipwho.is: ' + (json?.message || 'unexpected response');
+    } else {
+      lastIpLookupError += ' / ipwho.is: HTTP ' + res.status;
     }
   }catch(e){
-    console.warn('ipwho.is lookup failed:', e);
+    lastIpLookupError += ' / ipwho.is: ' + e.message;
   }
   return null;
 }
@@ -374,12 +383,17 @@ function hoursThisWeek(logs){
 }
 
 async function clockAction(type){
+  if(state.isClocking) return; // guard against double-taps while a request is in flight
+  state.isClocking = true;
   state.clockError = null;
+  render();
+
   let loc;
   try{ loc = await getLocation(); }
   catch(e){ loc = { error:'Location access is blocked in this environment.' }; }
 
   const ipLoc = await lookupIpLocation();
+  state.ipDebug = ipLoc ? `IP captured: ${ipLoc.ip}` : `IP lookup failed — ${lastIpLookupError || 'unknown reason'}`;
 
   const { error } = await sb.from('time_logs').insert({
     resident_id: state.user.id,
@@ -399,6 +413,7 @@ async function clockAction(type){
   } else if(loc.error){
     state.clockError = loc.error + ' The clock event was still recorded, but without a location.';
   }
+  state.isClocking = false;
   await loadAllData();
   render();
 }
@@ -428,8 +443,23 @@ async function saveFacilityLocation(e){
   const f = e.target;
   const lat = parseFloat(f.lat.value);
   const lng = parseFloat(f.lng.value);
-  if(isNaN(lat) || isNaN(lng)) return;
-  await sb.from('programs').update({ facility_lat: lat, facility_lng: lng }).eq('id', PROGRAM_ID);
+  if(isNaN(lat) || isNaN(lng)){
+    state.clockError = 'Enter valid numbers for latitude and longitude.';
+    render();
+    return;
+  }
+  const { data: updated, error } = await sb.from('programs').update({ facility_lat: lat, facility_lng: lng }).eq('id', PROGRAM_ID).select();
+  if(error){
+    state.clockError = 'Could not save hospital location: ' + error.message;
+    render();
+    return;
+  }
+  if(!updated || updated.length === 0){
+    state.clockError = 'Hospital location was not saved — your account may not have director permissions on this program, or a database permissions update is needed.';
+    render();
+    return;
+  }
+  state.clockError = null;
   state.facilityForm = false;
   await loadAllData();
   render();
@@ -522,11 +552,12 @@ function renderResident(){
         <div class="pill ${status}"><span class="dot"></span>${status==='on'?'On duty':status==='leave'?'On approved leave':'Off duty'}</div>
       </div>
       <div class="clock-action" style="text-align:right;">
-        <button class="${isOn?'btn-out':'btn-in'}" id="clockBtn">${isOn?'Clock Out':'Clock In'}</button>
+        <button class="${isOn?'btn-out':'btn-in'}" id="clockBtn" ${state.isClocking ? 'disabled' : ''}>${state.isClocking ? 'Saving…' : (isOn?'Clock Out':'Clock In')}</button>
         <div class="geo-note">Location is captured at the moment you clock in or out.</div>
       </div>
     </div>
     ${state.clockError ? `<div class="err">${state.clockError}</div>` : ''}
+    ${state.ipDebug ? `<div class="log-meta mono" style="margin-top:6px;">${state.ipDebug}</div>` : ''}
 
     <div class="grid">
       <div class="card">
@@ -617,6 +648,7 @@ function renderDirector(){
     <div class="card" style="margin-bottom:18px;">
       <h2>Resident status <span class="count">live</span></h2>
       ${residentIds.length===0 ? '<div class="empty">No residents have signed up yet.</div>' : `
+      <div class="table-scroll">
       <table>
         <tr><th></th><th>Resident</th><th>Status</th><th>Last event</th><th>Hours this week</th><th>Days this month</th><th>Location</th><th>Flags</th></tr>
         ${residentIds.map(id=>{
@@ -673,12 +705,14 @@ function renderDirector(){
           </td></tr>` : '';
           return rowsHtml + detailHtml;
         }).join('')}
-      </table>`}
+      </table>
+      </div>`}
     </div>
 
     <div class="card">
       <h2>Sick leave requests <span class="count">${pendingLeaves.length} pending</span></h2>
       ${data.allLeaves.length===0 ? '<div class="empty">No leave requests filed yet.</div>' : `
+      <div class="table-scroll">
       <table>
         <tr><th>Resident</th><th>Dates</th><th>Reason</th><th>Status</th><th></th></tr>
         ${data.allLeaves.map(s=>`
@@ -693,7 +727,8 @@ function renderDirector(){
             ` : ''}</td>
           </tr>
         `).join('')}
-      </table>`}
+      </table>
+      </div>`}
     </div>
   `;
   document.getElementById('logoutBtn').onclick = signOut;
