@@ -344,6 +344,7 @@ async function lookupIpLocation(){
 function computeRiskFlags(logsAsc){
   const flags = {};
   let prev = null;
+  let lastDeviceId = null;
   for(const l of logsAsc){
     const f = {};
     if(l.accuracy_m != null && l.accuracy_m < ACCURACY_SUSPICIOUS_MAX_M){
@@ -361,6 +362,10 @@ function computeRiskFlags(logsAsc){
         if(speed > IMPOSSIBLE_SPEED_KMH) f.impossibleSpeedKmh = speed;
       }
     }
+    if(l.device_id && lastDeviceId && l.device_id !== lastDeviceId){
+      f.deviceChanged = true;
+    }
+    if(l.device_id) lastDeviceId = l.device_id;
     flags[l.id] = f;
     prev = l;
   }
@@ -368,7 +373,7 @@ function computeRiskFlags(logsAsc){
 }
 
 function hasAnyFlag(f){
-  return !!(f && (f.accuracySuspicious || f.ipMismatchKm || f.impossibleSpeedKmh));
+  return !!(f && (f.accuracySuspicious || f.ipMismatchKm || f.impossibleSpeedKmh || f.deviceChanged));
 }
 
 // ACGME duty-hour compliance checks, computed from chronologically-ordered (oldest first) logs.
@@ -388,6 +393,42 @@ function groupLogsByMonth(logs){
     groups[key].logs.push(l);
   }
   return Object.values(groups).sort((a,b)=> b.key.localeCompare(a.key, undefined, {numeric:true}));
+}
+
+// Generates (or retrieves) a random ID persisted in this browser's localStorage, used as a
+// rough "this device" fingerprint. This is NOT a hardware identifier — browsers don't expose
+// those — it's just a sticky random value. Clearing browser data, using a private/incognito
+// window, or switching browsers will all produce a "new device" from this app's perspective,
+// even on the resident's own phone. Treat any flag this produces as a prompt to ask, not proof.
+function getDeviceId(){
+  try{
+    let id = localStorage.getItem('em-duty-device-id');
+    if(!id){
+      id = (crypto.randomUUID ? crypto.randomUUID() : 'dev-' + Math.random().toString(36).slice(2) + Date.now());
+      localStorage.setItem('em-duty-device-id', id);
+    }
+    return id;
+  }catch(e){
+    return null; // localStorage unavailable (e.g. some private-browsing modes) — fail quietly
+  }
+}
+
+function getDeviceLabel(){
+  const ua = navigator.userAgent || '';
+  let os = 'Unknown OS';
+  if(/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+  else if(/Android/.test(ua)) os = 'Android';
+  else if(/Windows/.test(ua)) os = 'Windows';
+  else if(/Mac OS X/.test(ua)) os = 'Mac';
+  else if(/Linux/.test(ua)) os = 'Linux';
+  let browser = 'Unknown browser';
+  if(/CriOS/.test(ua)) browser = 'Chrome (iOS)';
+  else if(/FxiOS/.test(ua)) browser = 'Firefox (iOS)';
+  else if(/Edg\//.test(ua)) browser = 'Edge';
+  else if(/Chrome\//.test(ua)) browser = 'Chrome';
+  else if(/Safari\//.test(ua) && !/Chrome/.test(ua)) browser = 'Safari';
+  else if(/Firefox\//.test(ua)) browser = 'Firefox';
+  return os + ' · ' + browser;
 }
 
 function pairShifts(logsAsc){
@@ -595,7 +636,9 @@ async function clockAction(type){
     accuracy_m: loc.error ? null : loc.accuracy,
     ip_address: ipLoc ? ipLoc.ip : null,
     ip_lat: ipLoc ? ipLoc.lat : null,
-    ip_lng: ipLoc ? ipLoc.lng : null
+    ip_lng: ipLoc ? ipLoc.lng : null,
+    device_id: getDeviceId(),
+    device_label: getDeviceLabel()
   });
 
   if(error){
@@ -906,6 +949,7 @@ function renderDirector(){
                         if(rf.accuracySuspicious) badges.push('<span class="badge denied">Unusually precise GPS</span>');
                         if(rf.ipMismatchKm) badges.push(`<span class="badge denied">${Math.round(rf.ipMismatchKm)}km from IP location</span>`);
                         if(rf.impossibleSpeedKmh) badges.push(`<span class="badge denied">${Math.round(rf.impossibleSpeedKmh)}km/h since last event</span>`);
+                        if(rf.deviceChanged) badges.push('<span class="badge denied">Different device than last clock event</span>');
                         return `
                         <div class="log-row" style="display:block;">
                           <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -915,6 +959,7 @@ function renderDirector(){
                               ${l.auto_closed ? `<span class="badge pending" style="margin-left:6px;">Auto-closed at ${AUTO_CLOCKOUT_HOURS}h limit</span>` : ''}
                               <div class="log-meta mono" style="${offSite ? 'color:var(--red);' : ''}">${l.lat!=null ? l.lat.toFixed(5)+', '+l.lng.toFixed(5)+' · ±'+l.accuracy_m+'m accuracy' + (dist!=null ? ' · '+Math.round(dist)+'m from hospital'+(offSite?' ⚠ off-site':'') : '') : (l.auto_closed ? 'system-generated, no location' : 'location unavailable')}</div>
                               ${l.ip_address ? `<div class="log-meta mono">IP ${l.ip_address}${l.ip_lat!=null ? ' ('+l.ip_lat.toFixed(2)+', '+l.ip_lng.toFixed(2)+')' : ''}</div>` : ''}
+                              ${l.device_label ? `<div class="log-meta mono">Device: ${l.device_label}</div>` : ''}
                             </div>
                             <div class="log-meta mono">${fmtDateTime(l.occurred_at)}</div>
                           </div>
