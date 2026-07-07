@@ -35,6 +35,9 @@
   .who{font-size:13px;color:var(--slate);display:flex;align-items:center;gap:10px;}
   .who button{background:none;border:1px solid var(--line);color:var(--slate);padding:5px 11px;border-radius:7px;font-size:12.5px;cursor:pointer;font-family:'Inter';}
   .who button:hover{border-color:var(--teal-500);color:var(--teal-700);}
+  .who #refreshBtn{padding:5px 9px;font-size:15px;line-height:1;}
+  @keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
+  .who #refreshBtn.spinning{display:inline-block;animation:spin 0.7s linear infinite;border-color:var(--teal-500);color:var(--teal-700);}
 
   .landing{padding:40px 0 20px;max-width:380px;margin:0 auto;}
   .landing h1{font-family:'Space Grotesk';font-size:24px;margin:0 0 6px;letter-spacing:-.3px;text-align:center;}
@@ -209,6 +212,15 @@ async function signIn(e){
   await refreshSession();
   await loadAllData();
   render();
+}
+
+async function manualRefresh(){
+  const btn = document.getElementById('refreshBtn');
+  if(btn) btn.classList.add('spinning');
+  await loadAllData();
+  render();
+  // render() recreates the DOM so we can't remove the class from the old element
+  // — the spinning class won't survive re-render, which is fine (it stops naturally)
 }
 
 async function signOut(){
@@ -790,7 +802,7 @@ function topbar(subtitle){
       <div class="brand-mark">ED</div>
       <div><div class="brand-name">Duty Log</div><div class="brand-sub">${subtitle}</div></div>
     </div>
-    ${state.profile ? `<div class="who">${state.profile.full_name} <button id="logoutBtn">Sign out</button></div>` : ''}
+    ${state.profile ? `<div class="who">${state.profile.full_name} <button id="refreshBtn" title="Refresh">↻</button> <button id="logoutBtn">Sign out</button></div>` : ''}
   </div>`;
 }
 
@@ -915,6 +927,7 @@ function renderResident(){
   `;
   document.getElementById('clockBtn').onclick = ()=>clockAction(isOn?'out':'in');
   document.getElementById('logoutBtn').onclick = signOut;
+  const rb1 = document.getElementById('refreshBtn'); if(rb1) rb1.onclick = manualRefresh;
   document.getElementById('toggleLeaveForm').onclick = ()=>{ state.leaveForm = !state.leaveForm; render(); };
   const lf = document.getElementById('leaveForm');
   if(lf) lf.onsubmit = submitLeave;
@@ -1074,6 +1087,7 @@ function renderDirector(){
     </div>
   `;
   document.getElementById('logoutBtn').onclick = signOut;
+  const rb2 = document.getElementById('refreshBtn'); if(rb2) rb2.onclick = manualRefresh;
   document.getElementById('exportLogsBtn').onclick = exportTimeLogsCsv;
   document.getElementById('exportLeaveBtn').onclick = exportLeaveCsv;
   const facForm = document.getElementById('facilityForm');
@@ -1120,13 +1134,32 @@ if('serviceWorker' in navigator){
   await refreshSession();
   await loadAllData();
   render();
-  // Update only the clock time element every second — do NOT call render() on an interval.
-  // Calling render() every second destroys and recreates the DOM, which:
-  //   (a) dismisses the date picker the instant a resident opens it
-  //   (b) resets the "Saving..." button state mid-save
+
+  // Refresh data every 60 seconds in the background so the dashboard
+  // stays current without any manual action — important for iOS PWA
+  // where pull-to-refresh is not available in standalone mode.
+  setInterval(async ()=>{
+    if(!state.profile || state.isClocking) return;
+    await loadAllData();
+    render();
+  }, 60000);
+
+  // Refresh immediately whenever the app comes back to the foreground —
+  // covers the case where a resident switches away and returns, or
+  // wakes their phone after leaving the app open in the background.
+  document.addEventListener('visibilitychange', async ()=>{
+    if(document.visibilityState === 'visible' && state.profile && !state.isClocking){
+      await loadAllData();
+      render();
+    }
+  });
+
+  // Update only the clock digits every second — never re-render the full page.
+  // Calling render() every second destroys and recreates the DOM, which
+  // dismisses date pickers and resets the "Saving..." button state mid-save.
   setInterval(()=>{
     if(state.profile?.role !== 'resident') return;
-    if(state.isClocking) return; // never interrupt an in-progress save
+    if(state.isClocking) return;
     const el = document.getElementById('live-clock');
     if(el) el.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
   }, 1000);
