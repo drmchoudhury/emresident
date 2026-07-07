@@ -105,6 +105,7 @@
   .small-btn.deny:hover{background:var(--red-soft);border-color:var(--red);}
   .coords{font-size:11px;color:var(--slate-light);}
   .err{color:var(--red);font-size:12.5px;background:var(--red-soft);padding:8px 11px;border-radius:7px;margin-top:8px;}
+  .err.location-blocked{font-size:13px;padding:12px 14px;line-height:1.6;border-left:4px solid var(--red);}
 
   .hero-banner{
     width:100%;height:200px;border-radius:14px;overflow:hidden;position:relative;
@@ -261,21 +262,55 @@ async function loadAllData(){
 }
 
 // ============================================================
-// Geolocation (fail-safe)
+// Geolocation — blocks clock-in if permission is denied
 // ============================================================
+
+// Check the current permission state without triggering a prompt.
+// Returns 'granted', 'denied', 'prompt', or 'unknown'.
+async function checkLocationPermission(){
+  try{
+    if(!navigator.permissions) return 'unknown';
+    const result = await navigator.permissions.query({ name: 'geolocation' });
+    return result.state; // 'granted' | 'denied' | 'prompt'
+  }catch(e){
+    return 'unknown';
+  }
+}
+
+// Get location. If permission was previously denied, returns a special
+// { denied: true } object so the caller can block the action entirely
+// rather than recording a clock event without coordinates.
 function getLocation(){
   return new Promise((resolve)=>{
     try{
-      if(!navigator.geolocation){ resolve({error:'Location services are not available in this environment.'}); return; }
+      if(!navigator.geolocation){ resolve({error:'Location services are not available on this device.'}); return; }
       navigator.geolocation.getCurrentPosition(
         pos => resolve({lat:pos.coords.latitude, lng:pos.coords.longitude, accuracy:Math.round(pos.coords.accuracy)}),
-        err => resolve({error: 'Location was not captured (' + (err.message || 'permission denied') + ').'}),
-        { enableHighAccuracy:true, timeout:6000 }
+        err => {
+          // error code 1 = PERMISSION_DENIED
+          if(err.code === 1){
+            resolve({ denied: true });
+          } else {
+            resolve({ error: 'Location could not be captured (' + (err.message || 'unknown error') + ').' });
+          }
+        },
+        { enableHighAccuracy:true, timeout:8000 }
       );
     }catch(e){
-      resolve({error:'Location access is blocked in this environment.'});
+      resolve({ error:'Location access is blocked in this environment.' });
     }
   });
+}
+
+// Human-readable instructions for re-enabling location, per platform.
+function locationDeniedMessage(){
+  const ua = navigator.userAgent || '';
+  if(/iPhone|iPad|iPod/.test(ua)){
+    return 'Location access is turned off for this app. To enable it: go to your iPhone Settings → Privacy & Security → Location Services → Safari → set to "While Using". Then return here and try again.';
+  } else if(/Android/.test(ua)){
+    return 'Location access is blocked. To enable it: tap the lock icon (🔒) in your browser address bar → Permissions → Location → Allow. Then return here and try again.';
+  }
+  return 'Location access is blocked. Please enable location permission for this site in your browser settings, then try again.';
 }
 
 const GEOFENCE_RADIUS_M = 300; // distance from facility, in meters, beyond which a clock event is flagged
@@ -630,9 +665,29 @@ async function clockAction(type){
   }, 15000);
 
   try{
+    // Check permission state before attempting — if already denied, block immediately
+    // without even triggering the browser prompt (which won't appear again once denied).
+    const permState = await checkLocationPermission();
+    if(permState === 'denied'){
+      state.isClocking = false;
+      state.clockError = '🚫 ' + locationDeniedMessage();
+      render();
+      clearTimeout(watchdog);
+      return;
+    }
+
     let loc;
     try{ loc = await getLocation(); }
     catch(e){ loc = { error:'Location access is blocked in this environment.' }; }
+
+    // If the user just tapped "Deny" on the prompt that appeared, block the clock-in
+    if(loc.denied){
+      state.isClocking = false;
+      state.clockError = '🚫 ' + locationDeniedMessage();
+      render();
+      clearTimeout(watchdog);
+      return;
+    }
 
     const ipLoc = await lookupIpLocation();
     state.ipDebug = ipLoc ? `IP captured: ${ipLoc.ip}` : `IP lookup failed — ${lastIpLookupError || 'unknown reason'}`;
@@ -814,7 +869,7 @@ function renderResident(){
         <div class="geo-note">Location is captured at the moment you clock in or out.</div>
       </div>
     </div>
-    ${state.clockError ? `<div class="err">${state.clockError}</div>` : ''}
+    ${state.clockError ? `<div class="err${state.clockError.startsWith('🚫') ? ' location-blocked' : ''}">${state.clockError}</div>` : ''}
     ${state.autoCloseNotice ? `<div class="err" style="background:var(--amber-soft);color:#8A5A02;">${state.autoCloseNotice}</div>` : ''}
     ${state.ipDebug ? `<div class="log-meta mono" style="margin-top:6px;">${state.ipDebug}</div>` : ''}
 
