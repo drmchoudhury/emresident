@@ -619,36 +619,52 @@ async function clockAction(type){
   state.clockError = null;
   render();
 
-  let loc;
-  try{ loc = await getLocation(); }
-  catch(e){ loc = { error:'Location access is blocked in this environment.' }; }
+  // Hard watchdog — if anything hangs beyond 15 seconds, re-enable the button
+  // so the resident isn't permanently stuck on "Saving..."
+  const watchdog = setTimeout(()=>{
+    if(state.isClocking){
+      state.isClocking = false;
+      state.clockError = 'Clock event timed out — please try again. If this keeps happening, check your internet connection.';
+      render();
+    }
+  }, 15000);
 
-  const ipLoc = await lookupIpLocation();
-  state.ipDebug = ipLoc ? `IP captured: ${ipLoc.ip}` : `IP lookup failed — ${lastIpLookupError || 'unknown reason'}`;
+  try{
+    let loc;
+    try{ loc = await getLocation(); }
+    catch(e){ loc = { error:'Location access is blocked in this environment.' }; }
 
-  const { error } = await sb.from('time_logs').insert({
-    resident_id: state.user.id,
-    program_id: PROGRAM_ID,
-    type,
-    occurred_at: new Date().toISOString(),
-    lat: loc.error ? null : loc.lat,
-    lng: loc.error ? null : loc.lng,
-    accuracy_m: loc.error ? null : loc.accuracy,
-    ip_address: ipLoc ? ipLoc.ip : null,
-    ip_lat: ipLoc ? ipLoc.lat : null,
-    ip_lng: ipLoc ? ipLoc.lng : null,
-    device_id: getDeviceId(),
-    device_label: getDeviceLabel()
-  });
+    const ipLoc = await lookupIpLocation();
+    state.ipDebug = ipLoc ? `IP captured: ${ipLoc.ip}` : `IP lookup failed — ${lastIpLookupError || 'unknown reason'}`;
 
-  if(error){
-    state.clockError = 'Could not save clock event: ' + error.message;
-  } else if(loc.error){
-    state.clockError = loc.error + ' The clock event was still recorded, but without a location.';
+    const { error } = await sb.from('time_logs').insert({
+      resident_id: state.user.id,
+      program_id: PROGRAM_ID,
+      type,
+      occurred_at: new Date().toISOString(),
+      lat: loc.error ? null : loc.lat,
+      lng: loc.error ? null : loc.lng,
+      accuracy_m: loc.error ? null : loc.accuracy,
+      ip_address: ipLoc ? ipLoc.ip : null,
+      ip_lat: ipLoc ? ipLoc.lat : null,
+      ip_lng: ipLoc ? ipLoc.lng : null,
+      device_id: getDeviceId(),
+      device_label: getDeviceLabel()
+    });
+
+    if(error){
+      state.clockError = 'Could not save clock event: ' + error.message;
+    } else if(loc.error){
+      state.clockError = loc.error + ' The clock event was still recorded, but without a location.';
+    }
+  } catch(e){
+    state.clockError = 'Unexpected error — please try again: ' + e.message;
+  } finally{
+    clearTimeout(watchdog);
+    state.isClocking = false;
+    await loadAllData();
+    render();
   }
-  state.isClocking = false;
-  await loadAllData();
-  render();
 }
 
 async function submitLeave(e){
@@ -789,7 +805,7 @@ function renderResident(){
     ${topbar('Resident view')}
     <div class="clock-card">
       <div>
-        <div class="clock-time mono">${now.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</div>
+        <div class="clock-time mono" id="live-clock">${now.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</div>
         <div class="clock-date">${now.toLocaleDateString([], {weekday:'long', month:'long', day:'numeric'})}</div>
         <div class="pill ${status}"><span class="dot"></span>${status==='on'?'On duty':status==='leave'?'On approved leave':'Off duty'}</div>
       </div>
@@ -1049,7 +1065,16 @@ if('serviceWorker' in navigator){
   await refreshSession();
   await loadAllData();
   render();
-  setInterval(()=>{ if(state.profile?.role==='resident') render(); }, 1000);
+  // Update only the clock time element every second — do NOT call render() on an interval.
+  // Calling render() every second destroys and recreates the DOM, which:
+  //   (a) dismisses the date picker the instant a resident opens it
+  //   (b) resets the "Saving..." button state mid-save
+  setInterval(()=>{
+    if(state.profile?.role !== 'resident') return;
+    if(state.isClocking) return; // never interrupt an in-progress save
+    const el = document.getElementById('live-clock');
+    if(el) el.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  }, 1000);
 })();
 </script>
 </body>
