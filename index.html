@@ -907,8 +907,17 @@ async function saveRotaEntries(blockName, entries, mapping){
   return null;
 }
 
+// Convert any date or timestamp to a LOCAL "YYYY-MM-DD" string.
+// Using toISOString().slice(0,10) returns UTC dates, which in UAE (+4) can be
+// one day behind local time after midnight. All calendar date comparisons must
+// use LOCAL dates to match the displayed calendar rows.
+function toLocalDateStr(d){
+  const date = d instanceof Date ? d : new Date(d);
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+}
+
 function rotaWeekDates(offset){
-  const today = new Date(); today.setHours(0,0,0,0);
+  const today = new Date(); today.setHours(0,0,0,0); // local midnight
   const mon = new Date(today);
   mon.setDate(today.getDate() - (today.getDay()===0?6:today.getDay()-1) + offset*7);
   return Array.from({length:7}, (_,i)=>{ const d=new Date(mon); d.setDate(mon.getDate()+i); return d; });
@@ -917,7 +926,8 @@ function rotaWeekDates(offset){
 function fmtDateShort(d){ return d.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'}); }
 
 function isClockedInOnDate(residentId, dateStr){
-  const dayLogs = data.allLogs.filter(l=>l.resident_id===residentId && l.occurred_at.slice(0,10)===dateStr)
+  const dayLogs = data.allLogs
+    .filter(l=>l.resident_id===residentId && toLocalDateStr(l.occurred_at)===dateStr)
     .sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
   if(!dayLogs.length) return false;
   return dayLogs[dayLogs.length-1].type === 'in';
@@ -925,7 +935,7 @@ function isClockedInOnDate(residentId, dateStr){
 
 function getDayLogs(residentId, dateStr){
   return data.allLogs
-    .filter(l=>l.resident_id===residentId && l.occurred_at.slice(0,10)===dateStr)
+    .filter(l=>l.resident_id===residentId && toLocalDateStr(l.occurred_at)===dateStr)
     .sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
 }
 
@@ -937,7 +947,7 @@ function getResidentDayFlags(residentId, dateStr){
     .sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
   const flags = computeRiskFlags(allResidentLogs);
   return allResidentLogs
-    .filter(l=>l.occurred_at.slice(0,10)===dateStr)
+    .filter(l=>toLocalDateStr(l.occurred_at)===dateStr)
     .some(l=>hasAnyFlag(flags[l.id]));
 }
 
@@ -957,31 +967,31 @@ function rotaCellStyle(assignment, residentId, dateStr){
     return { bg:'#FBE8C6', color:'#8A5A02', text:'Leave (app)' };
 
   // Text colour by assignment kind — background always set by clock logic below
-  const textColor = kind==='external' ? '#6B3F9E'
-                  : kind==='admin'    ? '#3A5FA0'
-                  : '#fff';
+  // External and admin use coloured text only for neutral/future states;
+  // for clock-based backgrounds (green/red) we always use white for legibility.
+  const neutralTextColor = kind==='external' ? '#6B3F9E' : kind==='admin' ? '#3A5FA0' : '#fff';
 
   // Neutral background when no resident is matched (can't check clocks)
   if(!residentId){
-    const neutralBg = kind==='external' ? '#F0EBF8'
-                    : kind==='admin'    ? '#EEF5FF'
-                    : '#F4F4F4';
-    return { bg:neutralBg, color:textColor, text:assignment };
+    const neutralBg = kind==='external' ? '#F0EBF8' : kind==='admin' ? '#EEF5FF' : '#F4F4F4';
+    return { bg:neutralBg, color:neutralTextColor, text:assignment };
   }
 
   // Default shift start: external and admin default to 08:00
   const startHour = (kind==='external' || kind==='admin') ? 8 : (shiftStartHour(assignment)||6);
   const now = new Date();
-  const d = new Date(dateStr);
-  const shiftStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), startHour, 0, 0);
-  const todayStr = now.toISOString().slice(0,10);
+  // Parse dateStr as LOCAL midnight to avoid UTC-offset issues in UAE (+4)
+  const [dYr, dMo, dDy] = dateStr.split('-').map(Number);
+  const d = new Date(dYr, dMo-1, dDy); // local midnight
+  const shiftStart = new Date(dYr, dMo-1, dDy, startHour, 0, 0); // local shift start
+  const todayStr = toLocalDateStr(now);
   const isFutureDate = dateStr > todayStr;
   const shiftHasStarted = now >= shiftStart;
 
   // Future date: neutral
   if(isFutureDate){
     const futureBg = kind==='external' ? '#F5F0FB' : '#fff';
-    return { bg:futureBg, color: kind==='external' ? '#9B77CC' : '#44514F', text:assignment };
+    return { bg:futureBg, color:neutralTextColor, text:assignment };
   }
 
   if(shiftHasStarted){
@@ -994,15 +1004,15 @@ function rotaCellStyle(assignment, residentId, dateStr){
     if(dayLogs.length>0 && getResidentDayFlags(residentId, dateStr))
       return { bg:'#D946EF', color:'#fff', text:assignment };
 
-    // Bright green: currently on duty
-    if(lastIsIn) return { bg:'#16A34A', color: textColor, text:assignment };
+    // Bright green: currently on duty — always white text
+    if(lastIsIn) return { bg:'#16A34A', color:'#fff', text:assignment };
 
-    // Light green: completed a full in→out cycle
-    const lightGreenText = kind==='external' ? '#5A2D91' : kind==='admin' ? '#1E3A6B' : '#14532D';
-    if(hasIn && hasOut) return { bg:'#86EFAC', color: lightGreenText, text:assignment };
+    // Light green: completed a full in→out cycle — always dark text for legibility
+    const lightGreenText = kind==='admin' ? '#1E3A6B' : '#14532D';
+    if(hasIn && hasOut) return { bg:'#86EFAC', color:lightGreenText, text:assignment };
 
-    // Red: past shift start, never clocked in
-    return { bg:'#EF4444', color: textColor, text:assignment };
+    // Red: past shift start, never clocked in — always white text
+    return { bg:'#EF4444', color:'#fff', text:assignment };
   }
 
   // Shift not yet started today
@@ -1022,7 +1032,7 @@ function renderRotaSection(){
   const hasMaster = data.masterSchedule.length > 0;
   const blockName = hasRota ? data.rotaEntries[0].block_name : '';
   const days = rotaWeekDates(state.rotaWeekOffset);
-  const dayStrs = days.map(d=>d.toISOString().slice(0,10));
+  const dayStrs = days.map(d=>toLocalDateStr(d));
 
   const rotaByKey = {};
   for(const e of data.rotaEntries){
@@ -1051,7 +1061,7 @@ function renderRotaSection(){
       </thead>
       <tbody>
         ${dayStrs.map((dateStr, di)=>{
-          const isToday = dateStr === new Date().toISOString().slice(0,10);
+          const isToday = dateStr === toLocalDateStr(new Date());
           return `<tr style="${isToday?'outline:2px solid #2E6B6E;outline-offset:-1px;':''}">
             <td style="position:sticky;left:0;background:${isToday?'#E8EFEF':'#F7F5F0'};font-weight:${isToday?'700':'400'};padding:8px 10px;border-bottom:1px solid #E2DFD6;white-space:nowrap;font-size:11.5px;z-index:1;">
               ${fmtDateShort(days[di])}${isToday?' <span style="background:#2E6B6E;color:#fff;border-radius:4px;padding:1px 5px;font-size:10px;">Today</span>':''}
@@ -1207,8 +1217,8 @@ function parseBlockDateRange(str, academicStartYear){
     const mo = MONTH_MAP[m[2].toLowerCase().slice(0,3)];
     if(mo===undefined) return null;
     const yr = mo >= 8 ? academicStartYear : academicStartYear+1;
-    const d = new Date(yr, mo, day);
-    return d.toISOString().slice(0,10);
+    const d = new Date(yr, mo, day); // LOCAL midnight
+    return toLocalDateStr(d); // LOCAL date string to match calendar system
   }
   const start = parsePart(parts[0]);
   const end = parsePart(parts[parts.length-1]);
