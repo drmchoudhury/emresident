@@ -148,8 +148,8 @@ const PROGRAM_ID = 'db507be1-a3a3-4c7e-ae46-7b08babc1468';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const root = document.getElementById('app');
-let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null, monthOverrides:{}, rotaTab:'calendar', rotaParsed:null, rotaMapping:{}, rotaSaving:false, rotaError:null, rotaWeekOffset:0 };
-let data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{}, rotaEntries:[] };
+let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null, monthOverrides:{}, rotaTab:'calendar', rotaParsed:null, rotaMapping:{}, rotaSaving:false, rotaError:null, rotaWeekOffset:0, masterParsed:null, masterMapping:{}, masterSaving:false, masterTab:'hidden' };
+let data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{}, rotaEntries:[], masterSchedule:[] };
 
 function fmtTime(ts){ return new Date(ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
 function fmtDateTime(ts){ const d=new Date(ts); return d.toLocaleDateString([], {month:'short',day:'numeric'}) + ', ' + fmtTime(ts); }
@@ -227,7 +227,7 @@ async function manualRefresh(){
 async function signOut(){
   await sb.auth.signOut();
   state = { loading:false, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null, monthOverrides:{} };
-  data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{}, rotaEntries:[] };
+  data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{}, rotaEntries:[], masterSchedule:[] };
   render();
 }
 
@@ -273,6 +273,8 @@ async function loadAllData(){
     (profs || []).forEach(p => data.profilesById[p.id] = p);
     const { data: rota } = await sb.from('rota_entries').select('*').eq('program_id', PROGRAM_ID).order('date', {ascending:true});
     data.rotaEntries = rota || [];
+    const { data: ms } = await sb.from('master_schedule').select('*').eq('program_id', PROGRAM_ID).order('block_number', {ascending:true});
+    data.masterSchedule = ms || [];
   }
 }
 
@@ -959,20 +961,31 @@ function rotaCellStyle(assignment, residentId, dateStr){
 
 function renderRotaSection(){
   const matchedResidents = Object.values(data.profilesById).filter(p=>p.role==='resident');
-  // Get residents that appear in rota and are matched
-  const matchedInRota = [...new Set(data.rotaEntries.filter(e=>e.resident_id).map(e=>e.resident_id))];
+  const rotaResidentIds = new Set(data.rotaEntries.filter(e=>e.resident_id).map(e=>e.resident_id));
+  const masterResidentIds = new Set(data.masterSchedule.filter(e=>e.resident_id).map(e=>e.resident_id));
+  const allResidentIds = new Set([...rotaResidentIds, ...masterResidentIds]);
+  const gridResidents = matchedResidents.filter(p=>allResidentIds.has(p.id));
+
   const hasRota = data.rotaEntries.length > 0;
+  const hasMaster = data.masterSchedule.length > 0;
   const blockName = hasRota ? data.rotaEntries[0].block_name : '';
   const days = rotaWeekDates(state.rotaWeekOffset);
   const dayStrs = days.map(d=>d.toISOString().slice(0,10));
 
-  // Build grid: only matched residents who have entries in this week's date range
-  const gridResidents = matchedResidents.filter(p=>matchedInRota.includes(p.id));
-
-  const rotaByKeyDate = {};
+  const rotaByKey = {};
   for(const e of data.rotaEntries){
     const key = e.date + '::' + (e.resident_id||e.resident_name_rota);
-    rotaByKeyDate[key] = e;
+    rotaByKey[key] = e;
+  }
+
+  function getCellForResident(residentId, dateStr){
+    // 1. Block rota entry takes priority (day-level detail)
+    const rk = dateStr+'::'+residentId;
+    if(rotaByKey[rk]) return { assignment: rotaByKey[rk].assignment, source:'rota' };
+    // 2. Master schedule fallback (block-level external assignment)
+    const me = getMasterEntryForDate(residentId, dateStr);
+    if(me) return { assignment: me.assignment, source:'master', isExternal: me.is_external };
+    return null;
   }
 
   const tableHtml = gridResidents.length===0 ? '' : `
@@ -981,7 +994,7 @@ function renderRotaSection(){
       <thead>
         <tr>
           <th style="position:sticky;left:0;background:#102E2F;color:#fff;padding:8px 10px;z-index:2;white-space:nowrap;min-width:120px;">Date</th>
-          ${gridResidents.map(p=>`<th style="background:#1F4B4D;color:#C8DCDB;padding:8px 8px;text-align:center;min-width:110px;white-space:nowrap;">${p.full_name.split(' ')[0]}</th>`).join('')}
+          ${gridResidents.map(p=>`<th style="background:#1F4B4D;color:#C8DCDB;padding:8px 8px;text-align:center;min-width:110px;white-space:nowrap;font-size:11px;">${p.full_name.split(' ')[0]}</th>`).join('')}
         </tr>
       </thead>
       <tbody>
@@ -992,32 +1005,44 @@ function renderRotaSection(){
               ${fmtDateShort(days[di])}${isToday?' <span style="background:#2E6B6E;color:#fff;border-radius:4px;padding:1px 5px;font-size:10px;">Today</span>':''}
             </td>
             ${gridResidents.map(p=>{
-              const key = dateStr+'::'+p.id;
-              const entry = rotaByKeyDate[key];
-              if(!entry) return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;color:#ccc;">—</td>`;
-              const style = rotaCellStyle(entry.assignment, p.id, dateStr);
-              return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;background:${style.bg};color:${style.color};font-weight:600;border-radius:4px;">${style.text}</td>`;
+              const cell = getCellForResident(p.id, dateStr);
+              if(!cell) return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;color:#ccc;font-size:11px;">—</td>`;
+              // For master-schedule-only cells, skip clock-in color logic (no day-level data)
+              const styleSource = cell.source==='master' && cell.isExternal ? 'external_master' : 'rota';
+              let style;
+              if(styleSource==='external_master'){
+                style = { bg:'#F0EBF8', color:'#6B3F9E', text:cell.assignment };
+              } else {
+                style = rotaCellStyle(cell.assignment, p.id, dateStr);
+              }
+              const tooltip = cell.source==='master' ? ' title="From master schedule"' : '';
+              return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;background:${style.bg};color:${style.color};font-weight:600;border-radius:4px;font-size:11px;cursor:default;"${tooltip}>${style.text}${cell.source==='master'?'<sup style="font-size:8px;opacity:.6;"> ★</sup>':''}</td>`;
             }).join('')}
           </tr>`;
         }).join('')}
       </tbody>
     </table>
-    </div>`;
+    </div>
+    ${hasMaster ? `<div style="font-size:11px;color:var(--slate-light);margin-top:6px;">★ from master schedule (external block)</div>` : ''}`;
+
+  const hasMasterUploaded = data.masterSchedule.length > 0;
 
   return `
     <div class="card" style="margin-top:18px;">
       <h2>Rota calendar ${hasRota?`<span class="count">${blockName}</span>`:''}
-        <div style="display:flex;gap:8px;align-items:center;">
-          ${hasRota?`<button class="small-btn" id="rotaPrevWeekBtn">← Prev</button><button class="small-btn" id="rotaNextWeekBtn">Next →</button>`:''}
-          <button class="small-btn" id="rotaUploadToggleBtn">${state.rotaTab==='upload'?'← Back to calendar':'Upload / update rota'}</button>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          ${(hasRota||hasMaster)?`<button class="small-btn" id="rotaPrevWeekBtn">← Prev</button><button class="small-btn" id="rotaNextWeekBtn">Next →</button>`:''}
+          <button class="small-btn" id="rotaUploadToggleBtn">${state.rotaTab==='upload'?'← Calendar':'↑ Block rota'}</button>
+          <button class="small-btn" id="masterUploadToggleBtn">${state.masterTab==='upload'?'← Calendar':'↑ Master schedule'}</button>
         </div>
       </h2>
       ${state.rotaError ? `<div class="err" style="margin-bottom:10px;">${state.rotaError}</div>` : ''}
 
-      ${state.rotaTab === 'upload' ? renderRotaUploadUI() : (
-        !hasRota ? `<div class="empty">No rota uploaded yet. Click "Upload / update rota" to get started.</div>` :
-        (gridResidents.length===0 ? `<div class="empty">Rota is uploaded but no residents have been matched to app accounts yet. Re-upload the rota to map names.</div>` : tableHtml)
-      )}
+      ${state.rotaTab==='upload' ? renderRotaUploadUI() :
+        state.masterTab==='upload' ? renderMasterUploadUI() :
+        (!hasRota && !hasMaster) ? `<div class="empty">No rota uploaded yet. Upload the block rota and/or master schedule above to populate the calendar.</div>` :
+        (gridResidents.length===0 ? `<div class="empty">Rota is uploaded but no residents have been matched to app accounts yet. Re-upload to map names.</div>` : tableHtml)
+      }
     </div>`;
 }
 
@@ -1092,6 +1117,174 @@ async function handleRotaSave(){
   state.rotaError = null;
   await loadAllData();
   render();
+}
+
+// ============================================================
+// MASTER SCHEDULE — full-year block scheme upload & integration
+// ============================================================
+
+// Assignments that mean the resident is in ED or Ped ED (will appear in block rota)
+const ED_ASSIGNMENTS_RE = /^(AEM|PEM|ED\s*\/?\s*US|EMS|ED\s*\/\s*admin|RESEARCH\/ED|ELECTIVE.*EM)/i;
+
+function isEdAssignment(a){
+  if(!a) return false;
+  return ED_ASSIGNMENTS_RE.test(a.trim());
+}
+
+function cleanMasterAssignment(raw){
+  if(!raw) return '';
+  return raw
+    .replace(/\s+(resigned|xxxx+|skmc)\s*/gi, '')
+    .trim();
+}
+
+const MONTH_MAP = {jan:0,feb:1,mar:2,march:2,apr:3,april:3,may:4,jun:5,june:5,jul:6,july:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+
+function parseBlockDateRange(str, academicStartYear){
+  // "6 July-2 Aug", "1 Sep- 28 Sep", "22 Dec - 18 Jan"
+  if(!str) return null;
+  const parts = str.split('-').map(s=>s.trim()).filter(Boolean);
+  if(parts.length < 2) return null;
+  function parsePart(s){
+    const m = s.match(/(\d+)\s*([A-Za-z]+)/);
+    if(!m) return null;
+    const day = parseInt(m[1]);
+    const mo = MONTH_MAP[m[2].toLowerCase().slice(0,3)];
+    if(mo===undefined) return null;
+    const yr = mo >= 8 ? academicStartYear : academicStartYear+1;
+    const d = new Date(yr, mo, day);
+    return d.toISOString().slice(0,10);
+  }
+  const start = parsePart(parts[0]);
+  const end = parsePart(parts[parts.length-1]);
+  return (start && end) ? {start, end} : null;
+}
+
+function parseMasterExcel(arrayBuffer){
+  const wb = XLSX.read(new Uint8Array(arrayBuffer), {type:'array', cellDates:false});
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+  if(raw.length < 6) return null;
+
+  // Row 1 (index 1): block names
+  // Row 2 (index 2): date ranges
+  const blockRow = raw[1];
+  const dateRow  = raw[2];
+
+  // Build block info: col index → {blockNum, blockName, start, end}
+  const ACAD_YEAR = 2025; // academic year start
+  const blocks = {};
+  for(let c=2; c<blockRow.length; c++){
+    const bn = String(blockRow[c]||'').trim();
+    const dr = String(dateRow[c]||'').trim();
+    if(!bn || !dr) continue;
+    const num = parseInt(bn.replace(/\D+/g,''));
+    if(!num) continue;
+    const dates = parseBlockDateRange(dr, ACAD_YEAR);
+    if(dates) blocks[c] = { blockNum:num, blockName:bn, start:dates.start, end:dates.end };
+  }
+
+  // Rows 5+ (index 5+): residents
+  const residents = [];
+  let currentYear = '';
+  for(let r=5; r<raw.length; r++){
+    const col0 = String(raw[r][0]||'').trim();
+    const col1 = String(raw[r][1]||'').trim();
+    if(col0.match(/^R\d/)) currentYear = col0;
+    if(!col1 || col1.toLowerCase()==='none') continue;
+    const entries = [];
+    for(const [c, blk] of Object.entries(blocks)){
+      const raw_a = String(raw[r][c]||'').trim();
+      const assignment = cleanMasterAssignment(raw_a);
+      if(!assignment) continue;
+      entries.push({
+        blockNum: blk.blockNum,
+        blockName: blk.blockName,
+        blockStart: blk.start,
+        blockEnd: blk.end,
+        assignment,
+        isExternal: !isEdAssignment(assignment)
+      });
+    }
+    if(entries.length) residents.push({ name:col1, yearGroup:currentYear, entries });
+  }
+
+  return { academicYear:`${ACAD_YEAR}-${ACAD_YEAR+1}`, residents };
+}
+
+async function saveMasterSchedule(parsed, mapping){
+  await sb.from('master_schedule').delete().eq('program_id', PROGRAM_ID).eq('academic_year', parsed.academicYear);
+  const rows = [];
+  for(const res of parsed.residents){
+    for(const e of res.entries){
+      rows.push({
+        program_id: PROGRAM_ID,
+        academic_year: parsed.academicYear,
+        resident_name_master: res.name,
+        resident_id: mapping[res.name] || null,
+        year_group: res.yearGroup,
+        block_number: e.blockNum,
+        block_start_date: e.blockStart,
+        block_end_date: e.blockEnd,
+        assignment: e.assignment,
+        is_external: e.isExternal
+      });
+    }
+  }
+  for(let i=0;i<rows.length;i+=200){
+    const {error} = await sb.from('master_schedule').insert(rows.slice(i,i+200));
+    if(error) return error;
+  }
+  return null;
+}
+
+function getMasterEntryForDate(residentId, dateStr){
+  return data.masterSchedule.find(e=>
+    e.resident_id===residentId &&
+    e.block_start_date<=dateStr &&
+    dateStr<=e.block_end_date
+  ) || null;
+}
+
+function renderMasterUploadUI(){
+  if(state.masterSaving) return `<div class="empty">Saving master schedule…</div>`;
+  if(!state.masterParsed) return `
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <p style="font-size:13px;color:var(--slate);margin:0;">Upload the full-year master schedule Excel. Residents on external blocks will automatically appear on the calendar even when absent from the block rota.</p>
+      <label style="display:inline-flex;align-items:center;gap:10px;background:var(--teal-700);color:#fff;padding:10px 16px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13.5px;width:fit-content;">
+        Choose master schedule (.xlsx)
+        <input type="file" id="masterFileInput" accept=".xlsx,.xls" style="display:none;">
+      </label>
+    </div>`;
+  const { residents } = state.masterParsed;
+  const appResidents = Object.values(data.profilesById).filter(p=>p.role==='resident');
+  // Auto-suggest by first name if not already mapped
+  for(const r of residents){
+    if(!state.masterMapping[r.name]){
+      const s = suggestMatch(r.name, data.profilesById);
+      if(s) state.masterMapping[r.name] = s.id;
+    }
+  }
+  return `
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <p style="font-size:13px;color:var(--slate);margin:0;"><strong>${state.masterParsed.academicYear}</strong> — ${residents.length} residents found. Match names to app accounts.</p>
+      <div style="max-height:280px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <tr style="background:var(--teal-700);color:#fff;"><th style="padding:8px 10px;text-align:left;">Name in schedule</th><th style="padding:8px 10px;text-align:left;">Year</th><th style="padding:8px 10px;text-align:left;">Match to app account</th></tr>
+          ${residents.map(r=>`<tr style="border-bottom:1px solid var(--line);">
+            <td style="padding:8px 10px;font-weight:600;">${r.name}</td>
+            <td style="padding:8px 10px;color:var(--slate-light);">${r.yearGroup}</td>
+            <td style="padding:8px 10px;">
+              <select class="master-name-map" data-master-name="${r.name}" style="width:100%;font-size:12.5px;padding:4px 6px;border:1px solid var(--line);border-radius:6px;">
+                <option value="">Not in app</option>
+                ${appResidents.map(p=>`<option value="${p.id}" ${state.masterMapping[r.name]===p.id?'selected':''}>${p.full_name}</option>`).join('')}
+              </select>
+            </td>
+          </tr>`).join('')}
+        </table>
+      </div>
+      <button class="submit-btn" id="masterSaveBtn">Save master schedule</button>
+    </div>`;
 }
 
 function topbar(subtitle){
@@ -1400,14 +1593,33 @@ function renderDirector(){
 
   // Rota handlers
   const rotaToggle = document.getElementById('rotaUploadToggleBtn');
-  if(rotaToggle) rotaToggle.onclick = ()=>{ state.rotaTab = state.rotaTab==='upload'?'calendar':'upload'; state.rotaParsed=null; state.rotaError=null; render(); };
+  if(rotaToggle) rotaToggle.onclick = ()=>{ state.rotaTab = state.rotaTab==='upload'?'calendar':'upload'; state.masterTab='hidden'; state.rotaParsed=null; state.rotaError=null; render(); };
+  const masterToggle = document.getElementById('masterUploadToggleBtn');
+  if(masterToggle) masterToggle.onclick = ()=>{ state.masterTab = state.masterTab==='upload'?'hidden':'upload'; state.rotaTab='calendar'; state.masterParsed=null; state.rotaError=null; render(); };
   const rotaFileInput = document.getElementById('rotaFileInput');
   if(rotaFileInput) rotaFileInput.onchange = e=>{ if(e.target.files[0]) handleRotaFile(e.target.files[0]); };
+  const masterFileInput = document.getElementById('masterFileInput');
+  if(masterFileInput) masterFileInput.onchange = async e=>{
+    if(!e.target.files[0]) return;
+    const buf = await e.target.files[0].arrayBuffer();
+    const parsed = parseMasterExcel(buf);
+    if(!parsed){ state.rotaError='Could not parse master schedule file.'; render(); return; }
+    state.masterParsed = parsed; state.masterMapping = {}; state.rotaError=null; render();
+  };
   const rotaSaveBtn = document.getElementById('rotaSaveBtn');
   if(rotaSaveBtn) rotaSaveBtn.onclick = ()=>{
-    // Capture mapping from selects before saving
     document.querySelectorAll('.rota-name-map').forEach(sel=>{ state.rotaMapping[sel.dataset.rotaName] = sel.value; });
     handleRotaSave();
+  };
+  const masterSaveBtn = document.getElementById('masterSaveBtn');
+  if(masterSaveBtn) masterSaveBtn.onclick = async ()=>{
+    document.querySelectorAll('.master-name-map').forEach(sel=>{ state.masterMapping[sel.dataset.masterName] = sel.value; });
+    state.masterSaving = true; render();
+    const err = await saveMasterSchedule(state.masterParsed, state.masterMapping);
+    state.masterSaving = false;
+    if(err){ state.rotaError='Save failed: '+err.message; render(); return; }
+    state.masterParsed=null; state.masterTab='hidden'; state.rotaError=null;
+    await loadAllData(); render();
   };
   const rotaPrev = document.getElementById('rotaPrevWeekBtn');
   if(rotaPrev) rotaPrev.onclick = ()=>{ state.rotaWeekOffset--; render(); };
