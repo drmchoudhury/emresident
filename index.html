@@ -923,40 +923,89 @@ function isClockedInOnDate(residentId, dateStr){
   return dayLogs[dayLogs.length-1].type === 'in';
 }
 
+function getDayLogs(residentId, dateStr){
+  return data.allLogs
+    .filter(l=>l.resident_id===residentId && l.occurred_at.slice(0,10)===dateStr)
+    .sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+}
+
+// Returns true if any clock event for this resident on this date carries a risk flag.
+// Uses the full resident log list so impossible-speed detection works across days.
+function getResidentDayFlags(residentId, dateStr){
+  const allResidentLogs = data.allLogs
+    .filter(l=>l.resident_id===residentId)
+    .sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+  const flags = computeRiskFlags(allResidentLogs);
+  return allResidentLogs
+    .filter(l=>l.occurred_at.slice(0,10)===dateStr)
+    .some(l=>hasAnyFlag(flags[l.id]));
+}
+
 function isLeaveApprovedOnDate(residentId, dateStr){
   return data.allLeaves.some(l=>l.resident_id===residentId && l.status==='approved' && l.start_date<=dateStr && dateStr<=l.end_date);
 }
 
 function rotaCellStyle(assignment, residentId, dateStr){
   const kind = classifyAssignment(assignment);
-  const lo = assignment.toLowerCase().trim();
+  const lo = (assignment||'').toLowerCase().trim();
+
   if(lo==='off') return { bg:'#F0F0F0', color:'#999', text:'OFF' };
   if(kind==='leave') return { bg:'#FBE8C6', color:'#8A5A02', text:assignment };
   if(kind==='empty') return { bg:'#fff', color:'#ccc', text:'—' };
 
-  // Check if resident has approved leave in app (override rota)
-  if(residentId && isLeaveApprovedOnDate(residentId, dateStr)) return { bg:'#FBE8C6', color:'#8A5A02', text:'Leave (app)' };
+  if(residentId && isLeaveApprovedOnDate(residentId, dateStr))
+    return { bg:'#FBE8C6', color:'#8A5A02', text:'Leave (app)' };
 
   if(kind==='admin') return { bg:'#EEF5FF', color:'#3A5FA0', text:assignment };
-  if(kind==='external') return { bg:'#F0EBF8', color:'#6B3F9E', text:assignment };
 
-  // ED shift — check clock status
-  if(!residentId) return { bg:'#F4F4F4', color:'#888', text:assignment };
-  const startHour = shiftStartHour(assignment);
-  const now = new Date();
-  const shiftDate = new Date(dateStr);
-  const shiftStart = new Date(shiftDate.getFullYear(), shiftDate.getMonth(), shiftDate.getDate(), startHour||7, 0, 0);
-  const isPast = now > shiftStart;
-  const isToday = dateStr === now.toISOString().slice(0,10);
-  const isFuture = new Date(dateStr) > now;
+  // For external blocks: purple text throughout, but background still follows clock status
+  const textColor = kind==='external' ? '#6B3F9E' : '#fff';
 
-  if(isFuture && !isToday) return { bg:'#fff', color:'#44514F', text:assignment };
-  if(isPast){
-    const ci = isClockedInOnDate(residentId, dateStr);
-    if(ci) return { bg:'#22C55E', color:'#fff', text:assignment }; // bright green
-    return { bg:'#EF4444', color:'#fff', text:assignment }; // bright red
+  // No resident matched — can't check clocks
+  if(!residentId){
+    const neutralBg = kind==='external' ? '#F0EBF8' : '#F4F4F4';
+    return { bg:neutralBg, color: kind==='external' ? '#6B3F9E' : '#888', text:assignment };
   }
-  return { bg:'#fff', color:'#44514F', text:assignment };
+
+  // Determine shift start — external blocks default to 08:00
+  const startHour = (kind==='external') ? 8 : (shiftStartHour(assignment)||6);
+  const now = new Date();
+  const d = new Date(dateStr);
+  const shiftStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), startHour, 0, 0);
+  const todayStr = now.toISOString().slice(0,10);
+  const isFutureDate = dateStr > todayStr;
+  const shiftHasStarted = now >= shiftStart;
+
+  // Future date: neutral
+  if(isFutureDate){
+    const futureBg = kind==='external' ? '#F5F0FB' : '#fff';
+    return { bg:futureBg, color: kind==='external' ? '#9B77CC' : '#44514F', text:assignment };
+  }
+
+  if(shiftHasStarted){
+    const dayLogs = getDayLogs(residentId, dateStr);
+    const hasIn   = dayLogs.some(l=>l.type==='in');
+    const hasOut  = dayLogs.some(l=>l.type==='out');
+    const lastIsIn = dayLogs.length>0 && dayLogs[dayLogs.length-1].type==='in';
+
+    // Magenta: any flagged clock event (overrides all green states)
+    if(dayLogs.length>0 && getResidentDayFlags(residentId, dateStr))
+      return { bg:'#D946EF', color:'#fff', text:assignment };
+
+    // Bright green: currently on duty
+    if(lastIsIn) return { bg:'#16A34A', color: textColor, text:assignment };
+
+    // Light green: completed a full in→out cycle
+    if(hasIn && hasOut) return { bg:'#86EFAC', color: kind==='external' ? '#5A2D91' : '#14532D', text:assignment };
+
+    // Red: past shift start, never clocked in
+    return { bg:'#EF4444', color: textColor, text:assignment };
+  }
+
+  // Shift not yet started today
+  const pendingBg = kind==='external' ? '#F5F0FB' : '#F7F9FF';
+  const pendingColor = kind==='external' ? '#9B77CC' : '#6080B0';
+  return { bg:pendingBg, color:pendingColor, text:assignment };
 }
 
 function renderRotaSection(){
@@ -1007,23 +1056,30 @@ function renderRotaSection(){
             ${gridResidents.map(p=>{
               const cell = getCellForResident(p.id, dateStr);
               if(!cell) return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;color:#ccc;font-size:11px;">—</td>`;
-              // For master-schedule-only cells, skip clock-in color logic (no day-level data)
-              const styleSource = cell.source==='master' && cell.isExternal ? 'external_master' : 'rota';
-              let style;
-              if(styleSource==='external_master'){
-                style = { bg:'#F0EBF8', color:'#6B3F9E', text:cell.assignment };
-              } else {
-                style = rotaCellStyle(cell.assignment, p.id, dateStr);
-              }
-              const tooltip = cell.source==='master' ? ' title="From master schedule"' : '';
-              return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;background:${style.bg};color:${style.color};font-weight:600;border-radius:4px;font-size:11px;cursor:default;"${tooltip}>${style.text}${cell.source==='master'?'<sup style="font-size:8px;opacity:.6;"> ★</sup>':''}</td>`;
+              // External master-schedule blocks stay purple; ED blocks from master schedule get full clock logic
+              const isExternalMaster = cell.source==='master' && cell.isExternal;
+              const style = isExternalMaster
+                ? { bg:'#F0EBF8', color:'#6B3F9E', text:cell.assignment }
+                : rotaCellStyle(cell.assignment, p.id, dateStr);
+              const tooltip = cell.source==='master' ? ` title="From master schedule"` : '';
+              const star = cell.source==='master' ? '<sup style="font-size:8px;opacity:.6;"> ★</sup>' : '';
+              return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;background:${style.bg};color:${style.color};font-weight:600;border-radius:4px;font-size:11px;cursor:default;"${tooltip}>${style.text}${star}</td>`;
             }).join('')}
           </tr>`;
         }).join('')}
       </tbody>
     </table>
     </div>
-    ${hasMaster ? `<div style="font-size:11px;color:var(--slate-light);margin-top:6px;">★ from master schedule (external block)</div>` : ''}`;
+    ${hasMaster ? `<div style="font-size:11px;color:var(--slate-light);margin-top:6px;">★ from master schedule</div>` : ''}
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;font-size:11px;">
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:12px;border-radius:3px;background:#16A34A;display:inline-block;"></span>On duty now</span>
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:12px;border-radius:3px;background:#86EFAC;display:inline-block;"></span>Shift completed</span>
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:12px;border-radius:3px;background:#EF4444;display:inline-block;"></span>Not clocked in</span>
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:12px;border-radius:3px;background:#D946EF;display:inline-block;"></span>Flagged</span>
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:12px;border-radius:3px;background:#FBE8C6;border:1px solid #D98E04;display:inline-block;"></span>Leave</span>
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:12px;border-radius:3px;background:#F0EBF8;border:1px solid #9B77CC;display:inline-block;"></span>External block</span>
+      <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:12px;border-radius:3px;background:#EEF5FF;border:1px solid #3A5FA0;display:inline-block;"></span>Admin day</span>
+    </div>`;
 
   const hasMasterUploaded = data.masterSchedule.length > 0;
 
