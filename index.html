@@ -12,6 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Duty Log">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
@@ -147,8 +148,8 @@ const PROGRAM_ID = 'db507be1-a3a3-4c7e-ae46-7b08babc1468';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const root = document.getElementById('app');
-let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null, monthOverrides:{} };
-let data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{} };
+let state = { loading:true, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null, monthOverrides:{}, rotaTab:'calendar', rotaParsed:null, rotaMapping:{}, rotaSaving:false, rotaError:null, rotaWeekOffset:0 };
+let data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{}, rotaEntries:[] };
 
 function fmtTime(ts){ return new Date(ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
 function fmtDateTime(ts){ const d=new Date(ts); return d.toLocaleDateString([], {month:'short',day:'numeric'}) + ', ' + fmtTime(ts); }
@@ -226,7 +227,7 @@ async function manualRefresh(){
 async function signOut(){
   await sb.auth.signOut();
   state = { loading:false, user:null, profile:null, authTab:'login', authError:null, authInfo:null, leaveForm:false, clockError:null, expandedResidentId:null, program:null, facilityForm:false, isClocking:false, ipDebug:null, autoCloseNotice:null, monthOverrides:{} };
-  data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{} };
+  data = { myLogs:[], myLeaves:[], allLogs:[], allLeaves:[], profilesById:{}, rotaEntries:[] };
   render();
 }
 
@@ -270,6 +271,8 @@ async function loadAllData(){
     const { data: profs } = await sb.from('profiles').select('*').eq('program_id', PROGRAM_ID);
     data.profilesById = {};
     (profs || []).forEach(p => data.profilesById[p.id] = p);
+    const { data: rota } = await sb.from('rota_entries').select('*').eq('program_id', PROGRAM_ID).order('date', {ascending:true});
+    data.rotaEntries = rota || [];
   }
 }
 
@@ -795,6 +798,302 @@ async function useCurrentLocationForFacility(){
 // ============================================================
 // Render
 // ============================================================
+// ============================================================
+// ROTA — Excel upload, name matching, calendar grid
+// ============================================================
+
+const ED_SHIFT_RE = /^(D|E|N)\s*(Resus|Zone|UCC|Ped|EM|2\s*Ped)/i;
+const LEAVE_TYPES = ['annual leave','study leave','exam leave','off','sick leave','sl','leave'];
+
+function classifyAssignment(a){
+  if(!a) return 'empty';
+  const lo = a.toLowerCase().trim();
+  if(LEAVE_TYPES.some(l=>lo.startsWith(l))) return 'leave';
+  if(lo==='off') return 'off';
+  if(lo.startsWith('ad')) return 'admin';
+  if(ED_SHIFT_RE.test(a.trim())) return 'ed_shift';
+  return 'external';
+}
+
+function shiftStartHour(assignment){
+  if(!assignment) return null;
+  const lo = assignment.trim().toLowerCase();
+  // Check for combined entries like AD/N Resus
+  if(lo.includes('/n ') || lo.startsWith('n ') || lo==='n') return 22;
+  if(lo.includes('/e ') || lo.startsWith('e ') || lo==='e') return 14;
+  if(lo.includes('/d ') || lo.startsWith('d ') || lo==='d') return 6;
+  if(lo.startsWith('ad')) return 8;
+  if(lo.startsWith('n')) return 22;
+  if(lo.startsWith('e')) return 14;
+  if(lo.startsWith('d')) return 6;
+  return null;
+}
+
+function excelSerialToDateStr(serial){
+  const d = new Date(Date.UTC(1899, 11, 30) + serial * 86400 * 1000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+}
+
+function parseRotaExcel(arrayBuffer){
+  const wb = XLSX.read(new Uint8Array(arrayBuffer), {type:'array', cellDates:false});
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+  if(raw.length < 3) return null;
+
+  // Row 0: Block name + rotation group headers (merged, so fill-forward)
+  const groupRow = raw[0].map(c=>String(c||'').trim());
+  let blockName = groupRow[0] || 'Block';
+  let curGroup = '';
+  const groupByCol = {};
+  for(let c=0;c<groupRow.length;c++){
+    if(groupRow[c]) curGroup = groupRow[c];
+    groupByCol[c] = curGroup;
+  }
+
+  // Row 1: "Day", "Date", then resident names
+  const headerRow = raw[1];
+  const SUMMARY_KEYWORDS = ['residents','interns','total','d resus','e resus','n resus'];
+  const residentCols = [];
+  for(let c=2;c<headerRow.length;c++){
+    const name = String(headerRow[c]||'').trim();
+    if(!name) continue;
+    if(SUMMARY_KEYWORDS.some(k=>name.toLowerCase().startsWith(k))) continue;
+    if(/^\d+$/.test(name)) continue;
+    residentCols.push({ col:c, name, group: groupByCol[c]||'Unknown' });
+  }
+
+  // Rows 2+: data
+  const entries = [];
+  for(let r=2;r<raw.length;r++){
+    const row = raw[r];
+    const serial = Number(row[1]);
+    if(!serial || serial < 40000) continue; // skip summary/empty rows
+    const dateStr = excelSerialToDateStr(serial);
+    for(const rc of residentCols){
+      const assignment = String(row[rc.col]||'').trim();
+      if(!assignment) continue;
+      entries.push({ date:dateStr, residentNameRota:rc.name, rotationGroup:rc.group, assignment });
+    }
+  }
+  return { blockName, residentCols, entries };
+}
+
+function suggestMatch(rotaName, profiles){
+  // Try first-name match against app profiles
+  const first = rotaName.split(/[\s,]/)[0].toLowerCase();
+  return Object.values(profiles).find(p=> p.role==='resident' && p.full_name.toLowerCase().startsWith(first)) || null;
+}
+
+async function saveRotaEntries(blockName, entries, mapping){
+  // mapping: rotaName -> profileId (or '' to skip)
+  // Delete existing entries for this block first
+  await sb.from('rota_entries').delete().eq('program_id', PROGRAM_ID).eq('block_name', blockName);
+  const rows = entries.map(e=>({
+    program_id: PROGRAM_ID,
+    block_name: blockName,
+    date: e.date,
+    resident_name_rota: e.residentNameRota,
+    resident_id: mapping[e.residentNameRota] || null,
+    rotation_group: e.rotationGroup,
+    assignment: e.assignment
+  }));
+  // Insert in batches of 200
+  for(let i=0;i<rows.length;i+=200){
+    const {error} = await sb.from('rota_entries').insert(rows.slice(i,i+200));
+    if(error) return error;
+  }
+  return null;
+}
+
+function rotaWeekDates(offset){
+  const today = new Date(); today.setHours(0,0,0,0);
+  const mon = new Date(today);
+  mon.setDate(today.getDate() - (today.getDay()===0?6:today.getDay()-1) + offset*7);
+  return Array.from({length:7}, (_,i)=>{ const d=new Date(mon); d.setDate(mon.getDate()+i); return d; });
+}
+
+function fmtDateShort(d){ return d.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'}); }
+
+function isClockedInOnDate(residentId, dateStr){
+  const dayLogs = data.allLogs.filter(l=>l.resident_id===residentId && l.occurred_at.slice(0,10)===dateStr)
+    .sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+  if(!dayLogs.length) return false;
+  return dayLogs[dayLogs.length-1].type === 'in';
+}
+
+function isLeaveApprovedOnDate(residentId, dateStr){
+  return data.allLeaves.some(l=>l.resident_id===residentId && l.status==='approved' && l.start_date<=dateStr && dateStr<=l.end_date);
+}
+
+function rotaCellStyle(assignment, residentId, dateStr){
+  const kind = classifyAssignment(assignment);
+  const lo = assignment.toLowerCase().trim();
+  if(lo==='off') return { bg:'#F0F0F0', color:'#999', text:'OFF' };
+  if(kind==='leave') return { bg:'#FBE8C6', color:'#8A5A02', text:assignment };
+  if(kind==='empty') return { bg:'#fff', color:'#ccc', text:'—' };
+
+  // Check if resident has approved leave in app (override rota)
+  if(residentId && isLeaveApprovedOnDate(residentId, dateStr)) return { bg:'#FBE8C6', color:'#8A5A02', text:'Leave (app)' };
+
+  if(kind==='admin') return { bg:'#EEF5FF', color:'#3A5FA0', text:assignment };
+  if(kind==='external') return { bg:'#F0EBF8', color:'#6B3F9E', text:assignment };
+
+  // ED shift — check clock status
+  if(!residentId) return { bg:'#F4F4F4', color:'#888', text:assignment };
+  const startHour = shiftStartHour(assignment);
+  const now = new Date();
+  const shiftDate = new Date(dateStr);
+  const shiftStart = new Date(shiftDate.getFullYear(), shiftDate.getMonth(), shiftDate.getDate(), startHour||7, 0, 0);
+  const isPast = now > shiftStart;
+  const isToday = dateStr === now.toISOString().slice(0,10);
+  const isFuture = new Date(dateStr) > now;
+
+  if(isFuture && !isToday) return { bg:'#fff', color:'#44514F', text:assignment };
+  if(isPast){
+    const ci = isClockedInOnDate(residentId, dateStr);
+    if(ci) return { bg:'#22C55E', color:'#fff', text:assignment }; // bright green
+    return { bg:'#EF4444', color:'#fff', text:assignment }; // bright red
+  }
+  return { bg:'#fff', color:'#44514F', text:assignment };
+}
+
+function renderRotaSection(){
+  const matchedResidents = Object.values(data.profilesById).filter(p=>p.role==='resident');
+  // Get residents that appear in rota and are matched
+  const matchedInRota = [...new Set(data.rotaEntries.filter(e=>e.resident_id).map(e=>e.resident_id))];
+  const hasRota = data.rotaEntries.length > 0;
+  const blockName = hasRota ? data.rotaEntries[0].block_name : '';
+  const days = rotaWeekDates(state.rotaWeekOffset);
+  const dayStrs = days.map(d=>d.toISOString().slice(0,10));
+
+  // Build grid: only matched residents who have entries in this week's date range
+  const gridResidents = matchedResidents.filter(p=>matchedInRota.includes(p.id));
+
+  const rotaByKeyDate = {};
+  for(const e of data.rotaEntries){
+    const key = e.date + '::' + (e.resident_id||e.resident_name_rota);
+    rotaByKeyDate[key] = e;
+  }
+
+  const tableHtml = gridResidents.length===0 ? '' : `
+    <div class="table-scroll" style="margin-top:12px;">
+    <table style="min-width:${120+gridResidents.length*110}px;font-size:12px;border-collapse:collapse;">
+      <thead>
+        <tr>
+          <th style="position:sticky;left:0;background:#102E2F;color:#fff;padding:8px 10px;z-index:2;white-space:nowrap;min-width:120px;">Date</th>
+          ${gridResidents.map(p=>`<th style="background:#1F4B4D;color:#C8DCDB;padding:8px 8px;text-align:center;min-width:110px;white-space:nowrap;">${p.full_name.split(' ')[0]}</th>`).join('')}
+        </tr>
+      </thead>
+      <tbody>
+        ${dayStrs.map((dateStr, di)=>{
+          const isToday = dateStr === new Date().toISOString().slice(0,10);
+          return `<tr style="${isToday?'outline:2px solid #2E6B6E;outline-offset:-1px;':''}">
+            <td style="position:sticky;left:0;background:${isToday?'#E8EFEF':'#F7F5F0'};font-weight:${isToday?'700':'400'};padding:8px 10px;border-bottom:1px solid #E2DFD6;white-space:nowrap;font-size:11.5px;z-index:1;">
+              ${fmtDateShort(days[di])}${isToday?' <span style="background:#2E6B6E;color:#fff;border-radius:4px;padding:1px 5px;font-size:10px;">Today</span>':''}
+            </td>
+            ${gridResidents.map(p=>{
+              const key = dateStr+'::'+p.id;
+              const entry = rotaByKeyDate[key];
+              if(!entry) return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;color:#ccc;">—</td>`;
+              const style = rotaCellStyle(entry.assignment, p.id, dateStr);
+              return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;background:${style.bg};color:${style.color};font-weight:600;border-radius:4px;">${style.text}</td>`;
+            }).join('')}
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    </div>`;
+
+  return `
+    <div class="card" style="margin-top:18px;">
+      <h2>Rota calendar ${hasRota?`<span class="count">${blockName}</span>`:''}
+        <div style="display:flex;gap:8px;align-items:center;">
+          ${hasRota?`<button class="small-btn" id="rotaPrevWeekBtn">← Prev</button><button class="small-btn" id="rotaNextWeekBtn">Next →</button>`:''}
+          <button class="small-btn" id="rotaUploadToggleBtn">${state.rotaTab==='upload'?'← Back to calendar':'Upload / update rota'}</button>
+        </div>
+      </h2>
+      ${state.rotaError ? `<div class="err" style="margin-bottom:10px;">${state.rotaError}</div>` : ''}
+
+      ${state.rotaTab === 'upload' ? renderRotaUploadUI() : (
+        !hasRota ? `<div class="empty">No rota uploaded yet. Click "Upload / update rota" to get started.</div>` :
+        (gridResidents.length===0 ? `<div class="empty">Rota is uploaded but no residents have been matched to app accounts yet. Re-upload the rota to map names.</div>` : tableHtml)
+      )}
+    </div>`;
+}
+
+function renderRotaUploadUI(){
+  if(state.rotaSaving) return `<div class="empty">Saving rota to database, please wait…</div>`;
+  if(!state.rotaParsed) return `
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <p style="font-size:13px;color:var(--slate);margin:0;">Upload your block Excel rota. The app will parse it and ask you to match resident names to app accounts.</p>
+      <label style="display:inline-flex;align-items:center;gap:10px;background:var(--teal-700);color:#fff;padding:10px 16px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13.5px;width:fit-content;">
+        Choose Excel file (.xlsx)
+        <input type="file" id="rotaFileInput" accept=".xlsx,.xls" style="display:none;">
+      </label>
+    </div>`;
+
+  // Name mapping UI
+  const { blockName, residentCols } = state.rotaParsed;
+  const residents = Object.values(data.profilesById).filter(p=>p.role==='resident');
+  return `
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <p style="font-size:13px;color:var(--slate);margin:0;"><strong>${blockName}</strong> — Match each rota name to an app account. Leave as "Not in app" to exclude from the calendar.</p>
+      <div style="max-height:320px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <tr style="background:var(--teal-700);color:#fff;"><th style="padding:8px 10px;text-align:left;">Name in rota</th><th style="padding:8px 10px;text-align:left;">Rotation group</th><th style="padding:8px 10px;text-align:left;">Match to app account</th></tr>
+          ${residentCols.map(rc=>{
+            const suggested = state.rotaMapping[rc.name] || (suggestMatch(rc.name, data.profilesById)||{}).id || '';
+            if(!state.rotaMapping[rc.name] && suggested) state.rotaMapping[rc.name] = suggested;
+            return `<tr style="border-bottom:1px solid var(--line);">
+              <td style="padding:8px 10px;font-weight:600;">${rc.name}</td>
+              <td style="padding:8px 10px;color:var(--slate-light);font-size:11.5px;">${rc.group}</td>
+              <td style="padding:8px 10px;">
+                <select class="rota-name-map" data-rota-name="${rc.name}" style="width:100%;font-size:12.5px;padding:4px 6px;border:1px solid var(--line);border-radius:6px;">
+                  <option value="">Not in app</option>
+                  ${residents.map(p=>`<option value="${p.id}" ${state.rotaMapping[rc.name]===p.id?'selected':''}>${p.full_name}</option>`).join('')}
+                </select>
+              </td>
+            </tr>`;
+          }).join('')}
+        </table>
+      </div>
+      <button class="submit-btn" id="rotaSaveBtn">Save rota to calendar</button>
+    </div>`;
+}
+
+async function handleRotaFile(file){
+  try{
+    const buf = await file.arrayBuffer();
+    const parsed = parseRotaExcel(buf);
+    if(!parsed || !parsed.entries.length){ state.rotaError = 'Could not parse this file. Make sure it is the block rota Excel.'; render(); return; }
+    state.rotaParsed = parsed;
+    state.rotaMapping = {};
+    // Pre-fill suggested matches
+    for(const rc of parsed.residentCols){
+      const s = suggestMatch(rc.name, data.profilesById);
+      if(s) state.rotaMapping[rc.name] = s.id;
+    }
+    state.rotaError = null;
+    render();
+  }catch(e){
+    state.rotaError = 'Error reading file: ' + e.message;
+    render();
+  }
+}
+
+async function handleRotaSave(){
+  if(!state.rotaParsed) return;
+  state.rotaSaving = true; render();
+  const error = await saveRotaEntries(state.rotaParsed.blockName, state.rotaParsed.entries, state.rotaMapping);
+  if(error){ state.rotaError = 'Save failed: ' + error.message; state.rotaSaving = false; render(); return; }
+  state.rotaSaving = false;
+  state.rotaParsed = null;
+  state.rotaTab = 'calendar';
+  state.rotaError = null;
+  await loadAllData();
+  render();
+}
+
 function topbar(subtitle){
   return `
   <div class="topbar">
@@ -1085,6 +1384,8 @@ function renderDirector(){
       </table>
       </div>`}
     </div>
+
+    ${renderRotaSection()}
   `;
   document.getElementById('logoutBtn').onclick = signOut;
   const rb2 = document.getElementById('refreshBtn'); if(rb2) rb2.onclick = manualRefresh;
@@ -1096,6 +1397,23 @@ function renderDirector(){
   if(toggleFacBtn) toggleFacBtn.onclick = ()=>{ state.facilityForm = !state.facilityForm; render(); };
   const useLocBtn = document.getElementById('useCurrentLocBtn');
   if(useLocBtn) useLocBtn.onclick = useCurrentLocationForFacility;
+
+  // Rota handlers
+  const rotaToggle = document.getElementById('rotaUploadToggleBtn');
+  if(rotaToggle) rotaToggle.onclick = ()=>{ state.rotaTab = state.rotaTab==='upload'?'calendar':'upload'; state.rotaParsed=null; state.rotaError=null; render(); };
+  const rotaFileInput = document.getElementById('rotaFileInput');
+  if(rotaFileInput) rotaFileInput.onchange = e=>{ if(e.target.files[0]) handleRotaFile(e.target.files[0]); };
+  const rotaSaveBtn = document.getElementById('rotaSaveBtn');
+  if(rotaSaveBtn) rotaSaveBtn.onclick = ()=>{
+    // Capture mapping from selects before saving
+    document.querySelectorAll('.rota-name-map').forEach(sel=>{ state.rotaMapping[sel.dataset.rotaName] = sel.value; });
+    handleRotaSave();
+  };
+  const rotaPrev = document.getElementById('rotaPrevWeekBtn');
+  if(rotaPrev) rotaPrev.onclick = ()=>{ state.rotaWeekOffset--; render(); };
+  const rotaNext = document.getElementById('rotaNextWeekBtn');
+  if(rotaNext) rotaNext.onclick = ()=>{ state.rotaWeekOffset++; render(); };
+
   document.querySelectorAll('.resident-row').forEach(row=>{
     row.onclick = ()=>{
       const id = row.dataset.id;
