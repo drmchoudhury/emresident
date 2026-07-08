@@ -956,19 +956,21 @@ function rotaCellStyle(assignment, residentId, dateStr){
   if(residentId && isLeaveApprovedOnDate(residentId, dateStr))
     return { bg:'#FBE8C6', color:'#8A5A02', text:'Leave (app)' };
 
-  if(kind==='admin') return { bg:'#EEF5FF', color:'#3A5FA0', text:assignment };
+  // Text colour by assignment kind — background always set by clock logic below
+  const textColor = kind==='external' ? '#6B3F9E'
+                  : kind==='admin'    ? '#3A5FA0'
+                  : '#fff';
 
-  // For external blocks: purple text throughout, but background still follows clock status
-  const textColor = kind==='external' ? '#6B3F9E' : '#fff';
-
-  // No resident matched — can't check clocks
+  // Neutral background when no resident is matched (can't check clocks)
   if(!residentId){
-    const neutralBg = kind==='external' ? '#F0EBF8' : '#F4F4F4';
-    return { bg:neutralBg, color: kind==='external' ? '#6B3F9E' : '#888', text:assignment };
+    const neutralBg = kind==='external' ? '#F0EBF8'
+                    : kind==='admin'    ? '#EEF5FF'
+                    : '#F4F4F4';
+    return { bg:neutralBg, color:textColor, text:assignment };
   }
 
-  // Determine shift start — external blocks default to 08:00
-  const startHour = (kind==='external') ? 8 : (shiftStartHour(assignment)||6);
+  // Default shift start: external and admin default to 08:00
+  const startHour = (kind==='external' || kind==='admin') ? 8 : (shiftStartHour(assignment)||6);
   const now = new Date();
   const d = new Date(dateStr);
   const shiftStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), startHour, 0, 0);
@@ -996,7 +998,8 @@ function rotaCellStyle(assignment, residentId, dateStr){
     if(lastIsIn) return { bg:'#16A34A', color: textColor, text:assignment };
 
     // Light green: completed a full in→out cycle
-    if(hasIn && hasOut) return { bg:'#86EFAC', color: kind==='external' ? '#5A2D91' : '#14532D', text:assignment };
+    const lightGreenText = kind==='external' ? '#5A2D91' : kind==='admin' ? '#1E3A6B' : '#14532D';
+    if(hasIn && hasOut) return { bg:'#86EFAC', color: lightGreenText, text:assignment };
 
     // Red: past shift start, never clocked in
     return { bg:'#EF4444', color: textColor, text:assignment };
@@ -1056,11 +1059,7 @@ function renderRotaSection(){
             ${gridResidents.map(p=>{
               const cell = getCellForResident(p.id, dateStr);
               if(!cell) return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;color:#ccc;font-size:11px;">—</td>`;
-              // External master-schedule blocks stay purple; ED blocks from master schedule get full clock logic
-              const isExternalMaster = cell.source==='master' && cell.isExternal;
-              const style = isExternalMaster
-                ? { bg:'#F0EBF8', color:'#6B3F9E', text:cell.assignment }
-                : rotaCellStyle(cell.assignment, p.id, dateStr);
+              const style = rotaCellStyle(cell.assignment, p.id, dateStr);
               const tooltip = cell.source==='master' ? ` title="From master schedule"` : '';
               const star = cell.source==='master' ? '<sup style="font-size:8px;opacity:.6;"> ★</sup>' : '';
               return `<td style="padding:6px 8px;border-bottom:1px solid #E2DFD6;text-align:center;background:${style.bg};color:${style.color};font-weight:600;border-radius:4px;font-size:11px;cursor:default;"${tooltip}>${style.text}${star}</td>`;
