@@ -988,10 +988,13 @@ function rotaCellStyle(assignment, residentId, dateStr){
   const isFutureDate = dateStr > todayStr;
   const shiftHasStarted = now >= shiftStart;
 
-  // Future date: neutral
+  // Future date: neutral — always use dark/coloured text (background is light/white)
   if(isFutureDate){
     const futureBg = kind==='external' ? '#F5F0FB' : '#fff';
-    return { bg:futureBg, color:neutralTextColor, text:assignment };
+    const futureColor = kind==='external' ? '#9B77CC'
+                      : kind==='admin'    ? '#6080B0'
+                      : '#44514F'; // dark slate for ED shifts — not white (would be invisible on white bg)
+    return { bg:futureBg, color:futureColor, text:assignment };
   }
 
   if(shiftHasStarted){
@@ -1015,9 +1018,11 @@ function rotaCellStyle(assignment, residentId, dateStr){
     return { bg:'#EF4444', color:'#fff', text:assignment };
   }
 
-  // Shift not yet started today
+  // Shift not yet started today — use coloured/dark text on light background
   const pendingBg = kind==='external' ? '#F5F0FB' : '#F7F9FF';
-  const pendingColor = kind==='external' ? '#9B77CC' : '#6080B0';
+  const pendingColor = kind==='external' ? '#9B77CC'
+                     : kind==='admin'    ? '#6080B0'
+                     : '#44514F'; // dark slate for ED shifts
   return { bg:pendingBg, color:pendingColor, text:assignment };
 }
 
