@@ -934,9 +934,23 @@ function isClockedInOnDate(residentId, dateStr){
 }
 
 function getDayLogs(residentId, dateStr){
+  // Clock-ins are filtered strictly to the shift date (LOCAL day).
+  // Clock-outs are extended to noon the next day so that overnight shifts
+  // (e.g. E shift 14:00→01:37, N shift 22:00→06:00) are correctly captured
+  // without picking up the next day's D shift clock-in (which starts at 06:00).
+  const [yr, mo, dy] = dateStr.split('-').map(Number);
+  const dayStart   = new Date(yr, mo-1, dy);       // LOCAL midnight
+  const dayEnd     = new Date(yr, mo-1, dy+1);     // LOCAL midnight next day
+  const nextNoon   = new Date(yr, mo-1, dy+1, 12, 0, 0); // LOCAL noon next day
   return data.allLogs
-    .filter(l=>l.resident_id===residentId && toLocalDateStr(l.occurred_at)===dateStr)
-    .sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+    .filter(l => {
+      if(l.resident_id !== residentId) return false;
+      const t = new Date(l.occurred_at);
+      return l.type === 'in'
+        ? t >= dayStart && t < dayEnd    // clock-ins: strict to this day
+        : t >= dayStart && t < nextNoon; // clock-outs: extended to next noon
+    })
+    .sort((a,b) => new Date(a.occurred_at)-new Date(b.occurred_at));
 }
 
 // Returns true if any clock event for this resident on this date carries a risk flag.
@@ -946,8 +960,11 @@ function getResidentDayFlags(residentId, dateStr){
     .filter(l=>l.resident_id===residentId)
     .sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
   const flags = computeRiskFlags(allResidentLogs);
+  const [yr, mo, dy] = dateStr.split('-').map(Number);
+  const dayStart = new Date(yr, mo-1, dy);
+  const nextNoon = new Date(yr, mo-1, dy+1, 12, 0, 0);
   return allResidentLogs
-    .filter(l=>toLocalDateStr(l.occurred_at)===dateStr)
+    .filter(l => { const t=new Date(l.occurred_at); return t>=dayStart && t<nextNoon; })
     .some(l=>hasAnyFlag(flags[l.id]));
 }
 
