@@ -1080,7 +1080,12 @@ function renderRotaSection(){
     </table>
     </div>
     ${hasMaster ? `<div style="font-size:11px;color:var(--slate-light);margin-top:6px;">★ from master schedule</div>` : ''}
-    <div style="font-size:10px;color:var(--slate-light);margin-top:4px;">Debug: today dateStr = ${toLocalDateStr(new Date())} | Mon this week = ${toLocalDateStr(days[0])}</div>
+    <div style="font-size:10px;color:var(--slate-light);margin-top:4px;">
+      Debug: Mon dateStr=${toLocalDateStr(days[0])} | rotaEntries loaded=${data.rotaEntries.length} | 
+      first entry date=${data.rotaEntries[0]?.date || 'none'} |
+      Mon key found=${!!rotaByKey[toLocalDateStr(days[0])+'::'+gridResidents[0]?.id]} |
+      Mon key tried=${toLocalDateStr(days[0])+'::'+gridResidents[0]?.id?.slice(0,8)}...
+    </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;font-size:11px;">
       <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:12px;border-radius:3px;background:#16A34A;display:inline-block;"></span>On duty now</span>
       <span style="display:flex;align-items:center;gap:4px;"><span style="width:12px;height:12px;border-radius:3px;background:#86EFAC;display:inline-block;"></span>Shift completed</span>
