@@ -597,7 +597,7 @@ function exportLeaveCsv(){
   downloadCsv(`sick-leave-${new Date().toISOString().slice(0,10)}.csv`, rows);
 }
 
-const AUTO_CLOCKOUT_HOURS = 12; // open shifts longer than this are automatically closed out
+const AUTO_CLOCKOUT_HOURS = 9; // open shifts longer than this are automatically closed out
 
 // Checks a chronologically-ordered (oldest first) log list for an open clock-in older
 // than AUTO_CLOCKOUT_HOURS, and if found, inserts a system-generated clock-out at
