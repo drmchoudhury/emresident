@@ -574,6 +574,103 @@ function downloadCsv(filename, rows){
   URL.revokeObjectURL(url);
 }
 
+function generateBlockReport(){
+  // Build a report comparing every rostered shift against actual clock events.
+  // Covers all residents matched in the current block rota and master schedule.
+  const blockName = data.rotaEntries.length > 0 ? data.rotaEntries[0].block_name : 'Block';
+
+  // Collect all dates and residents from rota_entries
+  const entries = data.rotaEntries.filter(e=>e.resident_id);
+
+  // Build a map: residentId → profile
+  const profMap = data.profilesById;
+
+  // Leave index: residentId → [{start_date, end_date, status}]
+  const leaveByResident = {};
+  for(const l of data.allLeaves){
+    if(!leaveByResident[l.resident_id]) leaveByResident[l.resident_id] = [];
+    leaveByResident[l.resident_id].push(l);
+  }
+
+  const rows = [['Block','Resident','Year','Date','Day','Rostered shift','Expected start',
+    'Clock in','Clock out','Duration (h)','Auto-closed','Status','Notes']];
+
+  for(const e of entries){
+    const prof = profMap[e.resident_id];
+    const resName = prof?.full_name || e.resident_name_rota;
+    const yearGroup = prof ? (data.masterSchedule.find(m=>m.resident_id===e.resident_id)?.year_group||'') : '';
+    const [yr, mo, dy] = e.date.split('-').map(Number);
+    const dayName = new Date(yr, mo-1, dy).toLocaleDateString([], {weekday:'short'});
+    const assignment = e.assignment;
+    const kind = classifyAssignment(assignment);
+
+    // Skip days off and leave entries from the rota
+    if(kind === 'off' || kind === 'empty') continue;
+    if(kind === 'leave') continue;
+
+    // Check if resident has approved leave for this date
+    const onLeave = (leaveByResident[e.resident_id]||[]).some(l=>
+      l.status==='approved' && l.start_date<=e.date && e.date<=l.end_date);
+    if(onLeave){ rows.push([blockName,resName,yearGroup,e.date,dayName,assignment,'','','','','','Leave','Approved leave in system']); continue; }
+
+    // Determine expected shift start hour
+    const startHour = (kind==='external'||kind==='admin') ? 8 : (shiftStartHour(assignment)||6);
+    const expectedStart = `${String(startHour).padStart(2,'0')}:00`;
+
+    // Get day logs using the same cross-midnight window as the calendar
+    const dayStart  = new Date(yr, mo-1, dy);
+    const dayEnd    = new Date(yr, mo-1, dy+1);
+    const nextNoon  = new Date(yr, mo-1, dy+1, 12, 0, 0);
+    const dayLogs = data.allLogs
+      .filter(l=>{
+        if(l.resident_id !== e.resident_id) return false;
+        const t = new Date(l.occurred_at);
+        return l.type==='in' ? (t>=dayStart && t<dayEnd) : (t>=dayStart && t<nextNoon);
+      })
+      .sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+
+    const clockInLog  = dayLogs.find(l=>l.type==='in');
+    const clockOutLog = dayLogs.filter(l=>l.type==='out').pop();
+    const isAutoClosed = clockOutLog?.auto_closed ? 'Yes' : 'No';
+
+    const clockInTime  = clockInLog  ? new Date(clockInLog.occurred_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
+    const clockOutTime = clockOutLog ? new Date(clockOutLog.occurred_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
+    const durationH = (clockInLog && clockOutLog)
+      ? ((new Date(clockOutLog.occurred_at)-new Date(clockInLog.occurred_at))/3600000).toFixed(1)
+      : '';
+
+    // Determine status and notes
+    let status, notes;
+    if(!clockInLog && !clockOutLog){
+      status = 'MISSING'; notes = 'No clock-in or clock-out recorded';
+    } else if(clockInLog && !clockOutLog){
+      status = 'INCOMPLETE'; notes = 'Clocked in but no clock-out';
+    } else if(!clockInLog && clockOutLog){
+      status = 'INCOMPLETE'; notes = 'Clock-out found with no matching clock-in';
+    } else if(clockOutLog?.auto_closed){
+      status = 'AUTO-CLOSED'; notes = `System auto-closed after ${AUTO_CLOCKOUT_HOURS}h`;
+    } else {
+      // Both clocked in and out — check lateness
+      const actualStart = new Date(clockInLog.occurred_at);
+      const expectedStartDt = new Date(yr, mo-1, dy, startHour, 0, 0);
+      const lateMinutes = Math.round((actualStart - expectedStartDt) / 60000);
+      if(lateMinutes > 30){
+        status = 'LATE'; notes = `Clocked in ${lateMinutes}min after expected start`;
+      } else if(lateMinutes < -60){
+        status = 'EARLY'; notes = `Clocked in ${Math.abs(lateMinutes)}min before expected start`;
+      } else {
+        status = 'OK'; notes = '';
+      }
+    }
+
+    rows.push([blockName, resName, yearGroup, e.date, dayName, assignment, expectedStart,
+      clockInTime, clockOutTime, durationH, isAutoClosed, status, notes]);
+  }
+
+  const date = new Date().toISOString().slice(0,10);
+  downloadCsv(`${blockName.replace(/\s+/g,'-')}-attendance-report-${date}.csv`, rows);
+}
+
 function exportTimeLogsCsv(){
   const rows = [['Resident','Type','Date/Time','Latitude','Longitude','Accuracy (m)','IP Address','Distance from hospital (m)']];
   data.allLogs.forEach(l=>{
@@ -1536,6 +1633,7 @@ function renderDirector(){
     <div style="display:flex;gap:10px;margin-bottom:18px;">
       <button class="small-btn" id="exportLogsBtn">⬇ Export time logs (CSV)</button>
       <button class="small-btn" id="exportLeaveBtn">⬇ Export leave requests (CSV)</button>
+      <button class="small-btn" id="exportBlockReportBtn" style="background:var(--teal-700);color:#fff;border-color:var(--teal-700);">⬇ Block attendance report (CSV)</button>
     </div>
 
     <div class="card" style="margin-bottom:18px;">
@@ -1671,6 +1769,7 @@ function renderDirector(){
   const rb2 = document.getElementById('refreshBtn'); if(rb2) rb2.onclick = manualRefresh;
   document.getElementById('exportLogsBtn').onclick = exportTimeLogsCsv;
   document.getElementById('exportLeaveBtn').onclick = exportLeaveCsv;
+  document.getElementById('exportBlockReportBtn').onclick = generateBlockReport;
   const facForm = document.getElementById('facilityForm');
   if(facForm) facForm.onsubmit = saveFacilityLocation;
   const toggleFacBtn = document.getElementById('toggleFacilityForm');
